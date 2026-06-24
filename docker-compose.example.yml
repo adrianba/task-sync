@@ -1,0 +1,70 @@
+services:
+  task-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: task-sync:latest
+    init: true
+    restart: unless-stopped
+
+    # Optionally load a local .env file containing secrets. Do not commit it.
+    # env_file:
+    #   - .env
+
+    environment:
+      # Core paths inside the container. These match the image defaults.
+      TASK_SYNC_VAULT_PATH: /vault
+      TASK_SYNC_STATE_PATH: /data/state.json
+      TASK_SYNC_LOG_LEVEL: ${TASK_SYNC_LOG_LEVEL:-info}
+
+      # Required when Microsoft To Do is enabled. Provide a 32-byte base64 or hex AES key.
+      TASK_SYNC_TOKEN_KEY: ${TASK_SYNC_TOKEN_KEY:-}
+
+      # Microsoft To Do backend. Set MS_ENABLED=true and provide MS_CLIENT_ID to enable.
+      MS_ENABLED: ${MS_ENABLED:-false}
+      MS_CLIENT_ID: ${MS_CLIENT_ID:-}
+      MS_AUTHORITY: ${MS_AUTHORITY:-https://login.microsoftonline.com/common}
+      MS_SCOPES: ${MS_SCOPES:-Tasks.ReadWrite,offline_access,User.Read}
+      MS_TOKEN_CACHE_PATH: /data/msal-cache.enc
+
+      # Supernote backend. This example joins the Supernote Docker network below,
+      # so Docker DNS resolves the MariaDB container name directly.
+      SUPERNOTE_ENABLED: ${SUPERNOTE_ENABLED:-false}
+      SUPERNOTE_DB_HOST: ${SUPERNOTE_DB_HOST:-supernote-mariadb}
+      SUPERNOTE_DB_PORT: ${SUPERNOTE_DB_PORT:-3306}
+      SUPERNOTE_DB_USER: ${SUPERNOTE_DB_USER:-supernote}
+      SUPERNOTE_DB_PASSWORD: ${SUPERNOTE_DB_PASSWORD:-}
+      SUPERNOTE_DB_NAME: ${SUPERNOTE_DB_NAME:-supernotedb}
+      SUPERNOTE_USER_ID: ${SUPERNOTE_USER_ID:-1}
+
+    volumes:
+      # Replace ./vault with your Obsidian vault path. The service reads and writes tasks.
+      - ./vault:/vault
+      # Persistent state.json and encrypted MSAL token cache.
+      - task-sync-data:/data
+
+    # HEALTHCHECK is inherited from the Dockerfile and probes GET /healthz on port 8080.
+    ports:
+      # Optional: expose health/readiness endpoints to the host.
+      - "8080:8080"
+
+    networks:
+      - supernote
+
+    # TCP fallback if MariaDB publishes 3306 to the host instead of sharing a Docker network:
+    # 1. Remove the networks section above.
+    # 2. Set SUPERNOTE_DB_HOST=host.docker.internal in your environment.
+    # 3. On Linux, uncomment:
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
+volumes:
+  task-sync-data:
+
+networks:
+  # External network created by the Supernote Private Cloud compose project.
+  # Find yours with:
+  #   docker inspect supernote-mariadb --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}'
+  supernote:
+    external: true
+    name: ${SUPERNOTE_DOCKER_NETWORK:-supernote_default}

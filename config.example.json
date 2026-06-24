@@ -1,0 +1,41 @@
+{
+  "vaultPath": "/vault",
+  "statePath": "/data/state.json",
+  "listMapping": "hybrid",
+  "ignore": [".obsidian", ".trash", ".git", "node_modules"],
+  "watchDebounceMs": 300,
+  "conflictPolicy": "newer",
+  "inboundInboxFile": "Sync Inbox.md",
+  "dryRun": false,
+  "health": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8080
+  },
+  "log": {
+    "level": "info"
+  },
+  "backends": {
+    "msTodo": {
+      "enabled": false,
+      "conflictPolicy": "newer",
+      "clientId": "",
+      "authority": "https://login.microsoftonline.com/common",
+      "scopes": ["Tasks.ReadWrite", "offline_access", "User.Read"],
+      "tokenCachePath": "/data/msal-cache.enc",
+      "tagListMap": {}
+    },
+    "supernote": {
+      "enabled": false,
+      "conflictPolicy": "vault-wins",
+      "db": {
+        "host": "supernote-mariadb",
+        "port": 3306,
+        "user": "supernote",
+        "database": "supernotedb",
+        "userId": 1
+      },
+      "tagListMap": {}
+    }
+  }
+}

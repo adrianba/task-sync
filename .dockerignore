@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+.git
+.github
+tests
+docs
+*.md
+!README.md
+config.local.json
+config.json
+.env
+.env.*
+data
+.task-sync
+docker-compose.example.yml
