@@ -13,6 +13,7 @@ import { SyncEngine } from "./sync/syncEngine.js";
 import { VaultWatcher, type VaultChange } from "./watcher/vaultWatcher.js";
 import { HealthServer } from "./health/httpServer.js";
 import type { MappingOptions } from "./mapping/listMapping.js";
+import { VERSION } from "./version.js";
 
 export interface ServiceOptions {
   /** Run a single reconcile pass then exit (no watcher/timers). */
@@ -61,6 +62,7 @@ export class Service {
   async start(): Promise<void> {
     const dryRun = this.options.dryRun ?? this.config.dryRun;
     this.log.info("Starting task-sync", {
+      version: VERSION,
       vaultPath: this.config.vaultPath,
       dryRun,
       once: this.options.once ?? false,

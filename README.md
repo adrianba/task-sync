@@ -104,8 +104,18 @@ any backend.
 
 ## Running in Docker
 
-A multi-stage [`Dockerfile`](./Dockerfile) builds a small, **non-root** runtime
-image with a `HEALTHCHECK` that probes `/healthz`.
+A multi-stage [`Dockerfile`](./Dockerfile) (based on `node:24-alpine`) builds a
+small, **non-root** runtime image with a `HEALTHCHECK` that probes `/healthz`.
+
+Pull a released image from the GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/adrianba/task-sync:latest
+# or a specific version
+docker pull ghcr.io/adrianba/task-sync:1.0.0
+```
+
+Or build it locally:
 
 ```bash
 docker build -t task-sync:latest .
@@ -360,6 +370,33 @@ npm run build      # compile to dist/
 CI (GitHub Actions) runs typecheck, lint, tests, and a Docker build on every
 push/PR. See [`AGENTS.md`](./AGENTS.md) for conventions and gotchas before
 contributing.
+
+The running version is read from `package.json` at startup and surfaced by
+`task-sync --version`, the `--help` banner, and the `"Starting task-sync"` log
+line.
+
+---
+
+## Releasing
+
+Releases are cut with the **Release** GitHub Actions workflow
+([`.github/workflows/release.yml`](./.github/workflows/release.yml)):
+
+1. In the repo, open **Actions → Release → Run workflow**.
+2. Enter the new **version** (semver, no leading `v` — e.g. `1.2.3`).
+
+The workflow then:
+
+- validates the version is semver and the tag `v<version>` does not already exist;
+- runs typecheck, lint, tests, and build as a gate;
+- bumps `version` in `package.json`/`package-lock.json`, commits it to `main`,
+  and pushes an annotated tag `v<version>`;
+- builds the Docker image and pushes it to the GitHub Container Registry as
+  `ghcr.io/adrianba/task-sync:<version>` and `:latest`.
+
+> First release only: the GHCR package is created as **private** by default.
+> Make it public (or grant pull access) via the package settings under the
+> repository's **Packages** if you want unauthenticated `docker pull`.
 
 ---
 

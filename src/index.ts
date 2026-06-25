@@ -6,6 +6,7 @@
  *   --once        run a single reconciliation pass and exit
  *   --dry-run     observe-only: never write to the vault or any backend
  *   --config <p>  path to a JSON config file
+ *   --version     print the version and exit
  *   --help        print usage
  *
  * Configuration is layered: defaults → config file → environment → these flags.
@@ -13,16 +14,23 @@
 import { loadConfig } from "./config.js";
 import { Service } from "./service.js";
 import { logger } from "./logger.js";
+import { VERSION } from "./version.js";
 
 interface CliArgs {
   once: boolean;
   dryRun: boolean;
   configPath?: string;
   help: boolean;
+  version: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { once: false, dryRun: false, help: false };
+  const args: CliArgs = {
+    once: false,
+    dryRun: false,
+    help: false,
+    version: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     switch (a) {
@@ -38,6 +46,10 @@ function parseArgs(argv: string[]): CliArgs {
         args.configPath = value;
         break;
       }
+      case "--version":
+      case "-v":
+        args.version = true;
+        break;
       case "--help":
       case "-h":
         args.help = true;
@@ -49,7 +61,7 @@ function parseArgs(argv: string[]): CliArgs {
   return args;
 }
 
-const USAGE = `task-sync — sync Obsidian Tasks with external task managers
+const USAGE = `task-sync v${VERSION} — sync Obsidian Tasks with external task managers
 
 Usage: task-sync [options]
 
@@ -57,12 +69,17 @@ Options:
   --once          Run a single reconciliation pass and exit
   --dry-run       Observe-only; never write to the vault or backends
   --config <path> Path to a JSON config file
+  -v, --version   Print the version and exit
   -h, --help      Show this help
 
 Environment: see README.md for the full list (TASK_SYNC_*, MS_*, SUPERNOTE_*).`;
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+  if (args.version) {
+    process.stdout.write(VERSION + "\n");
+    return;
+  }
   if (args.help) {
     process.stdout.write(USAGE + "\n");
     return;

@@ -133,3 +133,19 @@ engine to a specific provider.
   round-trip tests together.
 - Update [`docs/strategy-report.md`](docs/strategy-report.md) and this file when
   a design decision changes.
+
+## Versioning & releases
+
+- `VERSION` lives in `src/version.ts`, read once from `package.json` at runtime
+  via `new URL("../package.json", import.meta.url)` (no static JSON import — that
+  would break `rootDir: src` / `verbatimModuleSyntax`). Falls back to
+  `"0.0.0-dev"` if unreadable. It is surfaced by `--version`, the `--help`
+  banner, and the `"Starting task-sync"` log line.
+- The Dockerfile copies `package.json` next to `dist/` in the image so the
+  runtime read resolves to the released version.
+- Releases are cut by `.github/workflows/release.yml` (manual `workflow_dispatch`
+  with a `version` input). It gates on typecheck/lint/test/build, then bumps
+  `package.json`, commits + tags `v<version>` on `main`, and pushes the image to
+  `ghcr.io/adrianba/task-sync:<version>` and `:latest`. Build the image **after**
+  the version bump so the image carries the right version.
+
