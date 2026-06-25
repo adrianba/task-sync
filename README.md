@@ -295,9 +295,12 @@ Field-level merge is intentionally **not** performed; see
 ## Observability
 
 - **Structured JSON logs** to stdout with **secret redaction**.
-- **Health HTTP server** (default `:8080`):
+- **Health HTTP server** (binds **loopback `127.0.0.1:8080`** by default; set
+  `health.host` to `0.0.0.0` to expose it):
   - `GET /healthz` — liveness (process is up).
   - `GET /readyz` — readiness (backends initialized).
+  Responses carry only a coarse `{ "status": … }` — never internal errors or
+  task content (details go to logs only).
 - Docker **HEALTHCHECK** probes `/healthz`.
 - **Graceful shutdown** on `SIGTERM`/`SIGINT`: drains in-flight work and flushes
   state before exit.
@@ -312,9 +315,15 @@ Field-level merge is intentionally **not** performed; see
   auth tag) using `TASK_SYNC_TOKEN_KEY`; the file is written with `0600` perms.
 - Supernote access uses **parameterized queries only**, a least-privilege DB
   user, soft deletes, and per-`user_id` scoping.
-- All vault writes are **atomic** with optimistic-concurrency checks.
-- A single backend failure is **isolated** and never crashes the daemon.
-- The container runs as a **non-root** user on a minimal base image.
+- All vault writes are **atomic** with optimistic-concurrency checks and a
+  compare-and-swap re-read to avoid clobbering concurrent edits.
+- A single backend failure is **isolated**: a backend that fails to initialize is
+  marked degraded and skipped while the others keep syncing; the daemon stays up
+  as long as one backend is healthy.
+- Network and database calls are **time-bounded** (request/query timeouts) so a
+  stuck call cannot wedge the sync loop.
+- The **health server binds to loopback** by default, returns no internal error
+  detail, and the container runs as a **non-root** user on a minimal base image.
 
 Generate a token key:
 
@@ -358,7 +367,11 @@ contributing.
 
 - **Recurrence** is treated as lossy (round-tripped as text, not structured).
 - **Field-level merge** is deferred — conflicts resolve at whole-task
-  granularity.
+  granularity. Inbound edits update status/dates; inbound title changes are not
+  written back over a vault task.
+- **Deletions:** a task removed from the vault is deleted in the backends (links
+  cleaned up); a task deleted in a backend has its link cleared and, under the
+  default vault-wins policy, is re-created from the vault on the next pass.
 - One task maps to **one list per backend**; per-list fan-out is deferred.
 - Supernote `links` (notebook pages) are preserved but not created from the
   vault.

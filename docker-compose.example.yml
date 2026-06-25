@@ -43,10 +43,14 @@ services:
       # Persistent state.json and encrypted MSAL token cache.
       - task-sync-data:/data
 
-    # HEALTHCHECK is inherited from the Dockerfile and probes GET /healthz on port 8080.
-    ports:
-      # Optional: expose health/readiness endpoints to the host.
-      - "8080:8080"
+    # The Dockerfile HEALTHCHECK probes GET /healthz on 127.0.0.1:8080 *inside*
+    # the container, which works with the secure loopback default.
+    #
+    # To expose health/readiness to the HOST, the service must bind to 0.0.0.0.
+    # The health host is only configurable via a mounted config file (set
+    # health.host = "0.0.0.0"); then uncomment the ports mapping below.
+    # ports:
+    #   - "127.0.0.1:8080:8080"
 
     networks:
       - supernote

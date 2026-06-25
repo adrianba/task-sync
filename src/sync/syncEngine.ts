@@ -17,7 +17,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import type { Task } from "../model/task.js";
+import type { ExternalLink, Task } from "../model/task.js";
 import type {
   ExternalTask,
   ExternalTaskInput,
@@ -34,6 +34,7 @@ import { StateStore, hashTask } from "../state/stateStore.js";
 import {
   applyMutations,
   appendLines,
+  type ApplyResult,
   type TaskMutation,
 } from "../writer/markdownWriter.js";
 import { resolveConflict } from "./conflict.js";
@@ -59,6 +60,7 @@ export interface ReconcileResult {
   updatedOutbound: number;
   updatedInbound: number;
   inboundCreated: number;
+  deletedExternal: number;
   conflicts: number;
 }
 
@@ -69,8 +71,25 @@ function emptyResult(): ReconcileResult {
     updatedOutbound: 0,
     updatedInbound: 0,
     inboundCreated: 0,
+    deletedExternal: 0,
     conflicts: 0,
   };
+}
+
+interface ReconcileFilesResult {
+  result: ReconcileResult;
+  seenSyncIds: Set<string>;
+  hadReadError: boolean;
+}
+
+interface InboundApplyResult {
+  task: Task;
+  apply: ApplyResult;
+}
+
+interface FetchedExternalTasks {
+  changed: ExternalTask[];
+  removedIds: string[];
 }
 
 /** Build an ExternalTaskInput, omitting undefined optional fields. */
@@ -120,6 +139,10 @@ export class SyncEngine {
   private async parseFile(absPath: string): Promise<Task[]> {
     const rel = relative(this.options.vaultPath, absPath).split(sep).join("/");
     const content = await readFile(absPath, "utf8");
+    return this.parseTasksFromContent(content, rel);
+  }
+
+  private parseTasksFromContent(content: string, rel: string): Task[] {
     const tasks = parseTasks(content, rel);
     for (const t of tasks) {
       t.listKey = resolveListKey(t, this.options.mapping);
@@ -132,7 +155,13 @@ export class SyncEngine {
   /** Run a full reconciliation pass over the whole vault. */
   async reconcile(): Promise<ReconcileResult> {
     const files = await this.listMarkdownFiles(this.options.vaultPath);
-    const result = await this.reconcileFiles(files, false);
+    const filesResult = await this.reconcileFiles(files, false);
+    const result = filesResult.result;
+    if (!this.options.dryRun && !filesResult.hadReadError) {
+      result.deletedExternal += await this.deleteExternalTasksMissingFromVault(
+        filesResult.seenSyncIds,
+      );
+    }
     result.inboundCreated += await this.pullInbound();
     if (!this.options.dryRun) await this.store.flush();
     return result;
@@ -149,7 +178,7 @@ export class SyncEngine {
         !this.isIgnored(relative(this.options.vaultPath, p)) &&
         existsSync(p),
     );
-    const result = await this.reconcileFiles(relevant, true);
+    const { result } = await this.reconcileFiles(relevant, true);
     if (!this.options.dryRun) await this.store.flush();
     return result;
   }
@@ -163,8 +192,10 @@ export class SyncEngine {
   private async reconcileFiles(
     absPaths: string[],
     useFileHashSkip: boolean,
-  ): Promise<ReconcileResult> {
+  ): Promise<ReconcileFilesResult> {
     const result = emptyResult();
+    const seenSyncIds = new Set<string>();
+    let hadReadError = false;
 
     for (const abs of absPaths) {
       const rel = relative(this.options.vaultPath, abs).split(sep).join("/");
@@ -172,6 +203,7 @@ export class SyncEngine {
       try {
         content = await readFile(abs, "utf8");
       } catch (err) {
+        hadReadError = true;
         this.log.warn("Failed to read file; skipping", { file: rel, err });
         continue;
       }
@@ -179,18 +211,28 @@ export class SyncEngine {
       const fileHash = hashContent(content);
       if (useFileHashSkip && this.store.getFileHash(rel) === fileHash) continue;
 
-      let tasks = await this.parseFile(abs);
+      let tasks = this.parseTasksFromContent(content, rel);
 
       // Phase 1: assign missing sync IDs by writing them into the markdown.
       const idAssigned = await this.assignMissingIds(abs, tasks, result);
       if (idAssigned && !this.options.dryRun) {
         // Re-read so locations/rawLines reflect the written IDs.
-        tasks = await this.parseFile(abs);
+        try {
+          tasks = await this.parseFile(abs);
+        } catch (err) {
+          hadReadError = true;
+          this.log.warn("Failed to re-read file after assigning ids; skipping", {
+            file: rel,
+            err,
+          });
+          continue;
+        }
       }
 
       // Phase 2: outbound/3-way reconcile per task across all backends.
       for (const task of tasks) {
         if (!task.syncId) continue; // dry-run with unassigned ids
+        seenSyncIds.add(task.syncId);
         await this.reconcileTaskAcrossBackends(abs, task, result);
       }
 
@@ -201,7 +243,43 @@ export class SyncEngine {
       }
     }
 
-    return result;
+    return { result, seenSyncIds, hadReadError };
+  }
+
+  private async deleteExternalTasksMissingFromVault(seenSyncIds: Set<string>): Promise<number> {
+    let deleted = 0;
+    const entries = new Map(this.backends.map((entry) => [entry.adapter.backend, entry]));
+    for (const link of [...this.store.allLinks()]) {
+      if (seenSyncIds.has(link.syncId)) continue;
+      const entry = entries.get(link.backend);
+      if (!entry) continue;
+      if (link.externalListId === undefined) {
+        this.log.warn("Cannot delete external task for missing vault task without list id", {
+          backend: link.backend,
+          syncId: link.syncId,
+          externalId: link.externalId,
+        });
+        continue;
+      }
+      try {
+        await entry.adapter.deleteTask(link.externalListId, link.externalId);
+        this.store.deleteLink(link.syncId, link.backend);
+        deleted++;
+        this.log.info("Deleted external task for removed vault task", {
+          backend: link.backend,
+          syncId: link.syncId,
+          externalId: link.externalId,
+        });
+      } catch (err) {
+        this.log.warn("Failed to delete external task for removed vault task", {
+          backend: link.backend,
+          syncId: link.syncId,
+          externalId: link.externalId,
+          err,
+        });
+      }
+    }
+    return deleted;
   }
 
   private async assignMissingIds(
@@ -273,7 +351,7 @@ export class SyncEngine {
       if (this.options.dryRun) return task;
       const listId = await entry.adapter.ensureList(listName);
       const ext = await entry.adapter.createTask(listId, toInput(task));
-      this.store.setLink({
+      await this.persistLink({
         syncId,
         backend,
         externalId: ext.externalId,
@@ -295,7 +373,7 @@ export class SyncEngine {
       result.createdOutbound++;
       if (this.options.dryRun) return task;
       const recreated = await entry.adapter.createTask(listId, toInput(task));
-      this.store.setLink({
+      await this.persistLink({
         ...link,
         externalId: recreated.externalId,
         externalListId: listId,
@@ -343,7 +421,7 @@ export class SyncEngine {
         link.externalId,
         toInput(task),
       );
-      this.store.setLink({
+      await this.persistLink({
         ...link,
         externalListId: listId,
         lastKnownHash: curHash,
@@ -358,17 +436,26 @@ export class SyncEngine {
     // inbound
     result.updatedInbound++;
     if (this.options.dryRun) return task;
-    const updatedTask = await this.applyInbound(absPath, task, ext);
-    this.store.setLink({
+    const inbound = await this.applyInbound(absPath, task, ext);
+    if (inbound.apply.conflicts > 0) {
+      result.conflicts += inbound.apply.conflicts;
+      this.log.warn("Skipped inbound update due to optimistic concurrency conflict", {
+        backend,
+        syncId,
+        conflicts: inbound.apply.conflicts,
+      });
+      return task;
+    }
+    await this.persistLink({
       ...link,
       externalListId: listId,
-      lastKnownHash: hashTask(updatedTask),
+      lastKnownHash: hashTask(inbound.task),
       ...(ext.lastModified !== undefined
         ? { lastExternalModified: ext.lastModified }
         : {}),
       lastSyncedAt: new Date().toISOString(),
     });
-    return updatedTask;
+    return inbound.task;
   }
 
   /** Apply an external change onto the vault line and return the new task. */
@@ -376,7 +463,7 @@ export class SyncEngine {
     absPath: string,
     task: Task,
     ext: ExternalTask,
-  ): Promise<Task> {
+  ): Promise<InboundApplyResult> {
     const mutation: TaskMutation = {
       line: task.location.line,
       expectedLine: task.rawLine,
@@ -384,16 +471,18 @@ export class SyncEngine {
       ...(ext.done !== undefined ? { doneDate: ext.done } : {}),
       ...(ext.due !== undefined ? { dueDate: ext.due } : {}),
     };
-    await applyMutations(absPath, [mutation], {
+    const apply = await applyMutations(absPath, [mutation], {
       ...(this.options.suppressNext
         ? { onWillWrite: this.options.suppressNext }
         : {}),
     });
 
+    if (apply.conflicts > 0) return { task, apply };
+
     // Refresh the in-memory task so subsequent backends see the new state.
     const fresh = await this.parseFile(absPath);
     const match = fresh.find((t) => t.syncId === task.syncId);
-    return match ?? mergeInbound(task, ext);
+    return { task: match ?? mergeInbound(task, ext), apply };
   }
 
   // --- inbound creation (delta / listing) ---------------------------------
@@ -413,8 +502,9 @@ export class SyncEngine {
       try {
         const lists = await entry.adapter.listLists();
         for (const list of lists) {
-          const externals = await this.fetchExternalTasks(entry, list.id, list.name);
-          for (const ext of externals) {
+          const fetched = await this.fetchExternalTasks(entry, list.id, list.name);
+          await this.removeLinksForDeletedExternalTasks(backend, fetched.removedIds);
+          for (const ext of fetched.changed) {
             if (this.hasLinkForExternal(backend, ext.externalId)) continue;
             await this.createInboundTask(inboxAbs, list.name, ext, backend);
             created++;
@@ -432,24 +522,48 @@ export class SyncEngine {
     entry: BackendEntry,
     listId: string,
     listName: string,
-  ): Promise<ExternalTask[]> {
+  ): Promise<FetchedExternalTasks> {
     const backend = entry.adapter.backend;
     if (typeof entry.adapter.delta === "function") {
       const prev = this.store.getDeltaToken(backend, listId);
       try {
         const res = await entry.adapter.delta(listId, prev);
         this.store.setDeltaToken(backend, listId, res.token);
-        return res.changed;
+        return { changed: res.changed, removedIds: res.removedIds };
       } catch (err) {
         if (err instanceof DeltaTokenExpiredError) {
           this.log.warn("Delta token expired; full resync", { backend, listName });
+          this.store.deleteDeltaToken(backend, listId);
+          await this.store.flush();
           // fall through to full listing below
         } else {
           throw err;
         }
       }
     }
-    return entry.adapter.listTasks(listId);
+    return { changed: await entry.adapter.listTasks(listId), removedIds: [] };
+  }
+
+  private async removeLinksForDeletedExternalTasks(
+    backend: string,
+    removedIds: readonly string[],
+  ): Promise<void> {
+    let removed = 0;
+    for (const externalId of removedIds) {
+      const links = this.store
+        .allLinks()
+        .filter((link) => link.backend === backend && link.externalId === externalId);
+      for (const link of links) {
+        this.store.deleteLink(link.syncId, link.backend);
+        removed++;
+        this.log.info("Removed link for externally deleted task", {
+          backend,
+          syncId: link.syncId,
+          externalId,
+        });
+      }
+    }
+    if (removed > 0) await this.store.flush();
   }
 
   private hasLinkForExternal(backend: string, externalId: string): boolean {
@@ -482,7 +596,7 @@ export class SyncEngine {
       await appendLines(inboxAbs, [line], opts);
     }
 
-    this.store.setLink({
+    await this.persistLink({
       syncId,
       backend,
       externalId: ext.externalId,
@@ -492,6 +606,11 @@ export class SyncEngine {
         : {}),
       lastSyncedAt: new Date().toISOString(),
     });
+  }
+
+  private async persistLink(link: ExternalLink): Promise<void> {
+    this.store.setLink(link);
+    if (!this.options.dryRun) await this.store.flush();
   }
 }
 

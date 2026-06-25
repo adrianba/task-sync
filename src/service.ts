@@ -34,6 +34,9 @@ export class Service {
   private ready = false;
   private healthy = true;
   private running = false;
+  private stopping = false;
+  private activePass: Promise<void> | undefined;
+  private stopPromise: Promise<void> | undefined;
   private lastError: string | undefined;
 
   constructor(
@@ -67,7 +70,7 @@ export class Service {
     await this.store.load();
 
     this.registry = BackendRegistry.fromConfig(this.config, this.log);
-    await this.registry.initAll();
+    await this.registry.initAll(this.log);
 
     // The watcher is created early (but not started) so the engine can use its
     // suppressNext hook for loop protection on every write.
@@ -103,6 +106,7 @@ export class Service {
         isHealthy: () => this.healthy,
         details: () => ({
           running: this.running,
+          backends: this.registry?.healthyBackends() ?? [],
           ...(this.lastError ? { lastError: this.lastError } : {}),
         }),
         logger: this.log,
@@ -153,37 +157,78 @@ export class Service {
 
   /** Run a unit of work, isolating and recording errors without crashing. */
   private async runSafely(fn: () => Promise<void>): Promise<void> {
+    if (this.stopping) {
+      this.log.debug("Service is stopping; skipping reconcile");
+      return;
+    }
     if (this.running) {
       // Serialize passes to avoid concurrent writes to the same files.
       this.log.debug("Reconcile already running; skipping overlap");
       return;
     }
     this.running = true;
+    const pass = (async () => {
+      try {
+        await fn();
+        this.lastError = undefined;
+      } catch (err) {
+        this.healthy = true; // a single failed pass is not fatal
+        this.lastError = err instanceof Error ? err.message : String(err);
+        this.log.error("Reconcile pass failed", { err });
+      } finally {
+        this.running = false;
+      }
+    })();
+    this.activePass = pass;
     try {
-      await fn();
-      this.lastError = undefined;
-    } catch (err) {
-      this.healthy = true; // a single failed pass is not fatal
-      this.lastError = err instanceof Error ? err.message : String(err);
-      this.log.error("Reconcile pass failed", { err });
+      await pass;
     } finally {
-      this.running = false;
+      if (this.activePass === pass) this.activePass = undefined;
     }
   }
 
-  /** Gracefully stop: drain timers, watcher, health server and backends. */
+  /** Gracefully stop: stop intake, drain active work, flush state and close resources. */
   async stop(): Promise<void> {
+    this.stopPromise ??= this.stopOnce();
+    await this.stopPromise;
+  }
+
+  private async stopOnce(): Promise<void> {
+    this.stopping = true;
     this.ready = false;
+    await this.drainActivePass();
     if (this.inboundTimer) clearInterval(this.inboundTimer);
     this.inboundTimer = undefined;
     await this.watcher?.stop();
-    await this.health?.stop();
-    await this.registry?.closeAll(this.log);
     try {
       await this.store.flush();
     } catch (err) {
       this.log.warn("Failed to flush state on shutdown", { err });
     }
+    await this.registry?.closeAll(this.log);
+    await this.health?.stop();
     this.log.info("task-sync stopped");
+  }
+
+  private async drainActivePass(): Promise<void> {
+    const pass = this.activePass;
+    if (!pass) return;
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        pass,
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(() => {
+            this.log.warn("Timed out waiting for active reconcile during shutdown");
+            resolve();
+          }, 30_000);
+          if (typeof timeout.unref === "function") timeout.unref();
+        }),
+      ]);
+    } catch (err) {
+      this.log.warn("Active reconcile failed during shutdown", { err });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 }

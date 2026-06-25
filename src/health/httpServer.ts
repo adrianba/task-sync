@@ -17,7 +17,7 @@ export interface HealthServerOptions {
   isReady: () => boolean;
   /** Returns true while the service is healthy (e.g. not in a fatal state). */
   isHealthy: () => boolean;
-  /** Optional extra status fields (must be non-sensitive). */
+  /** Optional hook for logging detailed status without exposing it over HTTP. */
   details?: () => Record<string, unknown>;
   logger: Logger;
 }
@@ -37,14 +37,16 @@ export class HealthServer {
           return;
         }
         if (url.startsWith("/healthz")) {
-          respond(res, isHealthy(), { status: isHealthy() ? "ok" : "unhealthy" });
+          const healthy = isHealthy();
+          if (!healthy && details) logger.warn("Health check failed", details());
+          respond(res, healthy, { status: healthy ? "ok" : "unhealthy" });
           return;
         }
         if (url.startsWith("/readyz")) {
           const ready = isReady();
+          if (!ready && details) logger.warn("Readiness check failed", details());
           respond(res, ready, {
-            status: ready ? "ready" : "starting",
-            ...(details ? details() : {}),
+            status: ready ? "ok" : "not_ready",
           });
           return;
         }

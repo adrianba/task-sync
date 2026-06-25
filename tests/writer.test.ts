@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   applyMutationToLine,
@@ -48,7 +48,7 @@ describe("writer/applyMutations (atomic, optimistic concurrency)", () => {
   let dir: string;
   let file: string;
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "ts-writer-"));
+    dir = await mkdtemp(join(process.cwd(), ".ts-writer-"));
     file = join(dir, "Note.md");
   });
   afterEach(async () => {
@@ -96,12 +96,35 @@ describe("writer/applyMutations (atomic, optimistic concurrency)", () => {
     );
     expect(notified).toBe(file);
   });
+
+  it("retries instead of clobbering an unrelated concurrent edit", async () => {
+    await writeFile(file, "- [ ] Task\n- [ ] Other\n", "utf8");
+    let hookCalls = 0;
+
+    const res = await applyMutations(
+      file,
+      [{ line: 0, expectedLine: "- [ ] Task", statusChar: "x" }],
+      {
+        onWillWrite: (p) => {
+          hookCalls++;
+          if (hookCalls === 1) {
+            writeFileSync(p, "- [ ] Task\n- [ ] Other edited externally\n", "utf8");
+          }
+        },
+      },
+    );
+
+    expect(res.changed).toBe(true);
+    expect(res.conflicts).toBe(0);
+    expect(res.skippedDueToConcurrentEdit ?? false).toBe(false);
+    expect(await readFile(file, "utf8")).toBe("- [x] Task\n- [ ] Other edited externally\n");
+  });
 });
 
 describe("writer/appendLines", () => {
   let dir: string;
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "ts-append-"));
+    dir = await mkdtemp(join(process.cwd(), ".ts-append-"));
   });
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -129,5 +152,22 @@ describe("writer/appendLines", () => {
     await writeFile(file, "x", "utf8");
     await appendLines(file, []);
     expect(await readFile(file, "utf8")).toBe("x");
+  });
+
+  it("recomputes an append after an unrelated concurrent edit", async () => {
+    const file = join(dir, "Inbox.md");
+    await writeFile(file, "# Inbox\n", "utf8");
+    let hookCalls = 0;
+
+    await appendLines(file, ["- [ ] appended"], {
+      onWillWrite: (p) => {
+        hookCalls++;
+        if (hookCalls === 1) {
+          writeFileSync(p, "# Inbox\n- [ ] external\n", "utf8");
+        }
+      },
+    });
+
+    expect(await readFile(file, "utf8")).toBe("# Inbox\n- [ ] external\n- [ ] appended\n");
   });
 });

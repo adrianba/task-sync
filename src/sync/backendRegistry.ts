@@ -18,7 +18,13 @@ export interface BackendEntry {
 }
 
 export class BackendRegistry {
-  private constructor(private readonly backends: BackendEntry[]) {}
+  private initializedBackends: BackendEntry[] | undefined;
+
+  constructor(private readonly backends: BackendEntry[]) {
+    if (backends.length === 0) {
+      throw new Error("No backends are enabled.");
+    }
+  }
 
   /** Build the registry from validated config. Does not perform I/O. */
   static fromConfig(config: Config, logger: Logger): BackendRegistry {
@@ -46,26 +52,40 @@ export class BackendRegistry {
       });
     }
 
-    if (entries.length === 0) {
-      throw new Error("No backends are enabled.");
-    }
     return new BackendRegistry(entries);
   }
 
   entries(): readonly BackendEntry[] {
-    return this.backends;
+    return this.initializedBackends ?? this.backends;
   }
 
-  /** Initialize every adapter (auth, DB connect). */
-  async initAll(): Promise<void> {
+  healthyBackends(): readonly string[] {
+    return this.entries().map((e) => e.adapter.backend);
+  }
+
+  /** Initialize every adapter (auth, DB connect), excluding degraded backends. */
+  async initAll(logger?: Logger): Promise<void> {
+    const initialized: BackendEntry[] = [];
     for (const e of this.backends) {
-      await e.adapter.init?.();
+      try {
+        await e.adapter.init?.();
+        initialized.push(e);
+      } catch (err) {
+        logger?.error("Backend initialization failed; excluding backend from this run", {
+          backend: e.adapter.backend,
+          err,
+        });
+      }
+    }
+    this.initializedBackends = initialized;
+    if (initialized.length === 0) {
+      throw new Error("No backends initialized successfully.");
     }
   }
 
   /** Gracefully close every adapter. Errors are swallowed per-adapter. */
   async closeAll(logger?: Logger): Promise<void> {
-    for (const e of this.backends) {
+    for (const e of this.initializedBackends ?? []) {
       try {
         await e.adapter.close?.();
       } catch (err) {

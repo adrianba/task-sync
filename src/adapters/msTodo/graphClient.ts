@@ -38,14 +38,37 @@ export class GraphDeltaGoneError extends GraphError {
   }
 }
 
+export class GraphRequestTimeoutError extends Error {
+  constructor(
+    readonly timeoutMs: number,
+    options?: ErrorOptions,
+  ) {
+    super(`Graph request timed out after ${timeoutMs}ms`, options);
+    this.name = "GraphRequestTimeoutError";
+  }
+}
+
+export interface GraphClientOptions {
+  requestTimeoutMs?: number;
+  maxRetries?: number;
+  fetch?: typeof fetch;
+}
+
 export class GraphClient {
   private readonly baseUrl = "https://graph.microsoft.com/v1.0";
-  private readonly maxRetries = 5;
+  private readonly requestTimeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly fetchFn: typeof fetch;
 
   constructor(
     private readonly tokenProvider: TokenProvider,
     private readonly log: Logger = defaultLogger,
-  ) {}
+    options: GraphClientOptions = {},
+  ) {
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.maxRetries = options.maxRetries ?? 5;
+    this.fetchFn = options.fetch ?? fetch;
+  }
 
   async listLists(): Promise<GraphList[]> {
     const response = await this.request<GraphCollection<GraphList>>("GET", "/me/todo/lists");
@@ -141,41 +164,57 @@ export class GraphClient {
       const token = await this.tokenProvider();
       const requestInit: RequestInit = {
         method,
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
       };
-      if (body !== undefined) requestInit.body = JSON.stringify(body);
-      const response = await fetch(url, requestInit);
+      try {
+        if (body !== undefined) requestInit.body = JSON.stringify(body);
+        const response = await this.fetchFn(url, requestInit);
 
-      if (shouldRetry(response.status) && attempt < this.maxRetries) {
-        const waitMs = retryDelayMs(response, attempt);
-        this.log.warn("Retrying Microsoft Graph request", {
-          status: response.status,
+        if (shouldRetry(response.status) && attempt < this.maxRetries) {
+          const waitMs = retryDelayMs(response, attempt);
+          this.log.warn("Retrying Microsoft Graph request", {
+            status: response.status,
+            waitMs,
+            attempt: attempt + 1,
+          });
+          await sleep(waitMs);
+          continue;
+        }
+
+        if (response.status === 204) return undefined as T;
+
+        const text = await response.text();
+        if (!response.ok) {
+          const snippet = text.slice(0, 1_000);
+          if (deltaRequest && response.status === 410) {
+            throw new GraphDeltaGoneError(snippet);
+          }
+          throw new GraphError(
+            `Microsoft Graph ${method} failed with HTTP ${response.status}: ${snippet}`,
+            response.status,
+            snippet,
+          );
+        }
+
+        return text ? (JSON.parse(text) as T) : (undefined as T);
+      } catch (err) {
+        if (!isAbortError(err)) throw err;
+        const timeoutError = new GraphRequestTimeoutError(this.requestTimeoutMs, {
+          cause: err,
+        });
+        if (attempt >= this.maxRetries) throw timeoutError;
+        const waitMs = retryDelayMs(undefined, attempt);
+        this.log.warn("Retrying timed-out Microsoft Graph request", {
           waitMs,
           attempt: attempt + 1,
+          timeoutMs: this.requestTimeoutMs,
         });
         await sleep(waitMs);
-        continue;
       }
-
-      if (response.status === 204) return undefined as T;
-
-      const text = await response.text();
-      if (!response.ok) {
-        const snippet = text.slice(0, 1_000);
-        if (deltaRequest && response.status === 410) {
-          throw new GraphDeltaGoneError(snippet);
-        }
-        throw new GraphError(
-          `Microsoft Graph ${method} failed with HTTP ${response.status}: ${snippet}`,
-          response.status,
-          snippet,
-        );
-      }
-
-      return text ? (JSON.parse(text) as T) : (undefined as T);
     }
   }
 }
@@ -184,8 +223,8 @@ function shouldRetry(status: number): boolean {
   return status === 429 || (status >= 500 && status <= 599);
 }
 
-function retryDelayMs(response: Response, attempt: number): number {
-  const retryAfter = response.headers.get("Retry-After");
+function retryDelayMs(response: Response | undefined, attempt: number): number {
+  const retryAfter = response?.headers.get("Retry-After");
   if (retryAfter) {
     const seconds = Number(retryAfter);
     if (Number.isFinite(seconds)) return Math.max(seconds, 0) * 1_000;
@@ -193,6 +232,11 @@ function retryDelayMs(response: Response, attempt: number): number {
     if (Number.isFinite(retryAt)) return Math.max(retryAt - Date.now(), 0);
   }
   return Math.min(2 ** attempt * 500, 30_000);
+}
+
+function isAbortError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("name" in err)) return false;
+  return err.name === "AbortError" || err.name === "TimeoutError";
 }
 
 async function sleep(ms: number): Promise<void> {

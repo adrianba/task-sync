@@ -82,6 +82,10 @@ export class StateStore {
     this.data.deltaTokens[deltaKey(backend, listId)] = token;
   }
 
+  deleteDeltaToken(backend: string, listId: string): void {
+    delete this.data.deltaTokens[deltaKey(backend, listId)];
+  }
+
   getFileHash(filePath: string): string | undefined {
     return this.data.fileHashes[filePath];
   }

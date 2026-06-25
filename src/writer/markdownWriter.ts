@@ -59,6 +59,8 @@ export interface ApplyResult {
   changed: boolean;
   /** Edits skipped because the on-disk line no longer matched. */
   conflicts: number;
+  /** Write aborted because the file kept changing during compare-and-swap. */
+  skippedDueToConcurrentEdit?: boolean;
 }
 
 export interface ApplyMutationsOptions {
@@ -79,31 +81,51 @@ export async function applyMutations(
   mutations: TaskMutation[],
   options: ApplyMutationsOptions = {},
 ): Promise<ApplyResult> {
-  const original = await readFile(absPath, "utf8");
-  const lines = original.split("\n");
-  let changed = false;
-  let conflicts = 0;
+  let lastConflicts = 0;
 
-  for (const m of mutations) {
-    const current = lines[m.line];
-    if (current === undefined || current !== m.expectedLine) {
-      conflicts++;
+  for (let attempt = 0; attempt < maxCasAttempts; attempt++) {
+    const original = await readFile(absPath, "utf8");
+    const lines = original.split("\n");
+    let changed = false;
+    let conflicts = 0;
+
+    for (const m of mutations) {
+      const current = lines[m.line];
+      if (current === undefined || current !== m.expectedLine) {
+        conflicts++;
+        continue;
+      }
+      const next = applyMutationToLine(current, m);
+      if (next !== current) {
+        lines[m.line] = next;
+        changed = true;
+      }
+    }
+
+    lastConflicts = conflicts;
+
+    if (!changed) return { changed: false, conflicts };
+    if (options.dryRun) return { changed: true, conflicts };
+
+    const updated = lines.join("\n");
+    const beforeHook = await readFile(absPath, "utf8");
+    if (beforeHook !== original) {
       continue;
     }
-    const next = applyMutationToLine(current, m);
-    if (next !== current) {
-      lines[m.line] = next;
-      changed = true;
+    options.onWillWrite?.(absPath);
+    const currentOnDisk = await readFile(absPath, "utf8");
+    if (currentOnDisk !== original) {
+      continue;
     }
+    await atomicWriteFile(absPath, updated);
+    return { changed: true, conflicts };
   }
 
-  if (!changed) return { changed: false, conflicts };
-  if (options.dryRun) return { changed: true, conflicts };
-
-  const updated = lines.join("\n");
-  options.onWillWrite?.(absPath);
-  await atomicWriteFile(absPath, updated);
-  return { changed: true, conflicts };
+  return {
+    changed: false,
+    conflicts: lastConflicts,
+    skippedDueToConcurrentEdit: true,
+  };
 }
 
 export interface AppendOptions {
@@ -122,18 +144,36 @@ export async function appendLines(
   options: AppendOptions = {},
 ): Promise<void> {
   if (newLines.length === 0) return;
-  let existing = "";
-  try {
-    existing = await readFile(absPath, "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  for (let attempt = 0; attempt < maxCasAttempts; attempt++) {
+    const existing = await readFileIfExists(absPath);
+    const needsNl = existing.length > 0 && !existing.endsWith("\n");
+    const block = (needsNl ? "\n" : "") + newLines.join("\n") + "\n";
+    const updated = existing + block;
+
+    if (options.dryRun) return;
+    const beforeHook = await readFileIfExists(absPath);
+    if (beforeHook !== existing) {
+      continue;
+    }
+    options.onWillWrite?.(absPath);
+    const currentOnDisk = await readFileIfExists(absPath);
+    if (currentOnDisk !== existing) {
+      continue;
+    }
+    await atomicWriteFile(absPath, updated);
+    return;
   }
 
-  const needsNl = existing.length > 0 && !existing.endsWith("\n");
-  const block = (needsNl ? "\n" : "") + newLines.join("\n") + "\n";
-  const updated = existing + block;
+  throw new Error(`Failed to append to ${absPath}: concurrent edits did not settle`);
+}
 
-  if (options.dryRun) return;
-  options.onWillWrite?.(absPath);
-  await atomicWriteFile(absPath, updated);
+const maxCasAttempts = 3;
+
+async function readFileIfExists(absPath: string): Promise<string> {
+  try {
+    return await readFile(absPath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw err;
+  }
 }

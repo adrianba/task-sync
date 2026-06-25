@@ -56,7 +56,7 @@ const supernoteBackendSchema = z.object({
 
 const healthSchema = z.object({
   enabled: z.boolean().default(true),
-  host: z.string().default("0.0.0.0"),
+  host: z.string().default("127.0.0.1"),
   port: z.number().int().positive().default(8080),
 });
 

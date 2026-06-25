@@ -11,9 +11,15 @@ export interface SupernoteGroupRow {
   last_modified: number | string | bigint | null;
 }
 
+export interface SupernoteDbOptions {
+  queryTimeoutMs?: number;
+}
+
 type DbTaskRow = SupernoteTaskRow & RowDataPacket;
 type DbGroupRow = SupernoteGroupRow & RowDataPacket;
 type LinkRow = Pick<SupernoteTaskRow, "links"> & RowDataPacket;
+type SupernoteDbRuntimeConfig = SupernoteDbConfig & { queryTimeoutMs?: number };
+type DbValue = string | number | null;
 
 function newSupernoteId(): string {
   return randomUUID().replace(/-/g, "").toLowerCase();
@@ -27,11 +33,16 @@ function numberOrZero(value: number | string | bigint | null | undefined): numbe
 
 export class SupernoteDb {
   private pool: Pool | undefined;
+  private readonly queryTimeoutMs: number;
 
   public constructor(
     private readonly config: SupernoteDbConfig,
     private readonly log: Logger,
-  ) {}
+    options: SupernoteDbOptions = {},
+  ) {
+    this.queryTimeoutMs =
+      options.queryTimeoutMs ?? (config as SupernoteDbRuntimeConfig).queryTimeoutMs ?? 15_000;
+  }
 
   public async init(): Promise<void> {
     if (this.pool !== undefined) return;
@@ -47,12 +58,15 @@ export class SupernoteDb {
       charset: "utf8mb4",
     });
     const connection = await this.pool.getConnection();
-    connection.release();
-    this.log.debug("connected to Supernote MariaDB", {
-      host: this.config.host,
-      port: this.config.port,
-      database: this.config.database,
-    });
+    try {
+      this.log.debug("connected to Supernote MariaDB", {
+        host: this.config.host,
+        port: this.config.port,
+        database: this.config.database,
+      });
+    } finally {
+      connection.release();
+    }
   }
 
   public async end(): Promise<void> {
@@ -62,7 +76,7 @@ export class SupernoteDb {
   }
 
   public async listGroups(userId: number): Promise<SupernoteGroupRow[]> {
-    const [rows] = await this.requiredPool().query<DbGroupRow[]>(
+    const rows = await this.query<DbGroupRow[]>(
       "SELECT task_list_id, title, last_modified FROM t_schedule_task_group WHERE user_id = ? AND is_deleted = 'N' ORDER BY title",
       [userId],
     );
@@ -71,7 +85,7 @@ export class SupernoteDb {
 
   public async createGroup(userId: number, title: string): Promise<string> {
     const id = newSupernoteId();
-    await this.requiredPool().execute<ResultSetHeader>(
+    await this.execute(
       "INSERT INTO t_schedule_task_group (task_list_id, user_id, title, is_deleted, last_modified) VALUES (?, ?, ?, 'N', ?)",
       [id, userId, title, Date.now()],
     );
@@ -79,12 +93,12 @@ export class SupernoteDb {
   }
 
   public async listTasks(userId: number, listId: string | null): Promise<SupernoteTaskRow[]> {
-    const [rows] = listId === null
-      ? await this.requiredPool().query<DbTaskRow[]>(
+    const rows = listId === null
+      ? await this.query<DbTaskRow[]>(
           "SELECT task_id, task_list_id, title, status, due_time, completed_time, importance, last_modified, is_deleted, links FROM t_schedule_task WHERE user_id = ? AND is_deleted = 'N' AND task_list_id IS NULL ORDER BY last_modified DESC",
           [userId],
         )
-      : await this.requiredPool().query<DbTaskRow[]>(
+      : await this.query<DbTaskRow[]>(
           "SELECT task_id, task_list_id, title, status, due_time, completed_time, importance, last_modified, is_deleted, links FROM t_schedule_task WHERE user_id = ? AND is_deleted = 'N' AND task_list_id = ? ORDER BY last_modified DESC",
           [userId, listId],
         );
@@ -92,7 +106,7 @@ export class SupernoteDb {
   }
 
   public async getTask(userId: number, taskId: string): Promise<SupernoteTaskRow | null> {
-    const [rows] = await this.requiredPool().query<DbTaskRow[]>(
+    const rows = await this.query<DbTaskRow[]>(
       "SELECT task_id, task_list_id, title, status, due_time, completed_time, importance, last_modified, is_deleted, links FROM t_schedule_task WHERE user_id = ? AND task_id = ? AND is_deleted = 'N' LIMIT 1",
       [userId, taskId],
     );
@@ -109,7 +123,7 @@ export class SupernoteDb {
     const now = Date.now();
     const status = columns.status ?? "needsAction";
     const completedTime = status === "completed" ? (columns.completed_time ?? now) : 0;
-    await this.requiredPool().execute<ResultSetHeader>(
+    await this.execute(
       "INSERT INTO t_schedule_task (task_id, user_id, task_list_id, title, status, due_time, completed_time, importance, is_deleted, last_modified, links) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'N', ?, ?)",
       [
         id,
@@ -136,7 +150,7 @@ export class SupernoteDb {
   ): Promise<SupernoteTaskRow> {
     const existing = await this.getTask(userId, taskId);
     if (existing === null) throw new Error(`Supernote task not found: ${taskId}`);
-    const [linkRows] = await this.requiredPool().query<LinkRow[]>(
+    const linkRows = await this.query<LinkRow[]>(
       "SELECT links FROM t_schedule_task WHERE user_id = ? AND task_id = ? AND is_deleted = 'N' LIMIT 1",
       [userId, taskId],
     );
@@ -150,7 +164,7 @@ export class SupernoteDb {
       completedTime = 0;
     }
 
-    await this.requiredPool().execute<ResultSetHeader>(
+    await this.execute(
       "UPDATE t_schedule_task SET title = ?, status = ?, due_time = ?, completed_time = ?, importance = ?, links = ?, last_modified = ? WHERE user_id = ? AND task_id = ? AND is_deleted = 'N'",
       [
         columns.title ?? existing.title,
@@ -170,7 +184,7 @@ export class SupernoteDb {
   }
 
   public async softDeleteTask(userId: number, taskId: string): Promise<void> {
-    await this.requiredPool().execute<ResultSetHeader>(
+    await this.execute(
       "UPDATE t_schedule_task SET is_deleted = 'Y', last_modified = ? WHERE user_id = ? AND task_id = ?",
       [Date.now(), userId, taskId],
     );
@@ -181,12 +195,12 @@ export class SupernoteDb {
     listId: string | null,
     sinceMs: number,
   ): Promise<SupernoteTaskRow[]> {
-    const [rows] = listId === null
-      ? await this.requiredPool().query<DbTaskRow[]>(
+    const rows = listId === null
+      ? await this.query<DbTaskRow[]>(
           "SELECT task_id, task_list_id, title, status, due_time, completed_time, importance, last_modified, is_deleted, links FROM t_schedule_task WHERE user_id = ? AND is_deleted = 'N' AND task_list_id IS NULL AND last_modified > ? ORDER BY last_modified ASC",
           [userId, sinceMs],
         )
-      : await this.requiredPool().query<DbTaskRow[]>(
+      : await this.query<DbTaskRow[]>(
           "SELECT task_id, task_list_id, title, status, due_time, completed_time, importance, last_modified, is_deleted, links FROM t_schedule_task WHERE user_id = ? AND is_deleted = 'N' AND task_list_id = ? AND last_modified > ? ORDER BY last_modified ASC",
           [userId, listId, sinceMs],
         );
@@ -198,12 +212,12 @@ export class SupernoteDb {
     listId: string | null,
     sinceMs: number,
   ): Promise<SupernoteTaskRow[]> {
-    const [rows] = listId === null
-      ? await this.requiredPool().query<DbTaskRow[]>(
+    const rows = listId === null
+      ? await this.query<DbTaskRow[]>(
           "SELECT task_id, task_list_id, title, status, due_time, completed_time, importance, last_modified, is_deleted, links FROM t_schedule_task WHERE user_id = ? AND is_deleted = 'Y' AND task_list_id IS NULL AND last_modified > ? ORDER BY last_modified ASC",
           [userId, sinceMs],
         )
-      : await this.requiredPool().query<DbTaskRow[]>(
+      : await this.query<DbTaskRow[]>(
           "SELECT task_id, task_list_id, title, status, due_time, completed_time, importance, last_modified, is_deleted, links FROM t_schedule_task WHERE user_id = ? AND is_deleted = 'Y' AND task_list_id = ? AND last_modified > ? ORDER BY last_modified ASC",
           [userId, listId, sinceMs],
         );
@@ -217,5 +231,18 @@ export class SupernoteDb {
       );
     }
     return this.pool;
+  }
+
+  private async query<T extends RowDataPacket[]>(sql: string, values: DbValue[]): Promise<T> {
+    const [rows] = await this.requiredPool().query<T>({ sql, timeout: this.queryTimeoutMs }, values);
+    return rows;
+  }
+
+  private async execute(sql: string, values: DbValue[]): Promise<ResultSetHeader> {
+    const [result] = await this.requiredPool().execute<ResultSetHeader>(
+      { sql, timeout: this.queryTimeoutMs },
+      values,
+    );
+    return result;
   }
 }

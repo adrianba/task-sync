@@ -12,6 +12,7 @@ describe("config/loadConfig", () => {
     const cfg = loadConfig({ skipEnv: true, overrides: base });
     expect(cfg.listMapping).toBe("hybrid");
     expect(cfg.conflictPolicy).toBe("newer");
+    expect(cfg.health.host).toBe("127.0.0.1");
     expect(cfg.health.port).toBe(8080);
     expect(cfg.log.level).toBe("info");
     expect(cfg.vaultPath).toBe("/vault");
