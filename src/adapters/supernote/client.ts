@@ -106,6 +106,19 @@ export class SupernoteConflictError extends SupernoteServiceError {
   }
 }
 
+/**
+ * Thrown on HTTP 410 with code `cursor_expired` when the service is configured
+ * with `CURSOR_MAX_AGE_MS` and the supplied `since` cursor is older than the
+ * retention window. The adapter discards the stored delta token and performs a
+ * full resync (mirrors Microsoft Graph's `410 Gone` delta handling).
+ */
+export class SupernoteCursorExpiredError extends SupernoteServiceError {
+  constructor(code: string | undefined, body: string) {
+    super("Supernote delta cursor expired; full resync required", 410, code, body);
+    this.name = "SupernoteCursorExpiredError";
+  }
+}
+
 /** Thrown when a request exceeds the configured timeout. */
 export class SupernoteRequestTimeoutError extends Error {
   constructor(
@@ -159,8 +172,25 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
   }
 
   async listLists(): Promise<ServiceTaskList[]> {
-    const page = await this.request<{ lists: ServiceTaskList[] }>("GET", "/v1/lists");
-    return page.lists;
+    // Page via the `since` cursor from 0 so a large category set is fully
+    // enumerated; the cursor mode includes soft-deleted rows, so filter them
+    // out to return only active lists. Accumulate by id to collapse the
+    // inclusive-boundary re-delivery.
+    const byId = new Map<string, ServiceTaskList>();
+    let since = 0;
+    for (;;) {
+      const params = new URLSearchParams({ since: String(since) });
+      const page = await this.request<{ lists: ServiceTaskList[]; cursor: number; has_more: boolean }>(
+        "GET",
+        `/v1/lists?${params.toString()}`,
+      );
+      for (const list of page.lists) {
+        if (list.id !== null) byId.set(list.id, list);
+      }
+      if (!page.has_more) break;
+      since = page.cursor;
+    }
+    return [...byId.values()].filter((list) => !list.is_deleted);
   }
 
   async ensureList(title: string): Promise<ServiceTaskList> {
@@ -300,6 +330,9 @@ function toServiceError(method: string, status: number, text: string): Supernote
   const code = parseErrorCode(text);
   if (status === 404) return new SupernoteNotFoundError(code, snippet);
   if (status === 409) return new SupernoteConflictError(code, snippet);
+  if (status === 410 && code === "cursor_expired") {
+    return new SupernoteCursorExpiredError(code, snippet);
+  }
   return new SupernoteServiceError(
     `Supernote service ${method} failed with HTTP ${status}: ${snippet}`,
     status,

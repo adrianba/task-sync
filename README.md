@@ -250,7 +250,9 @@ The backend:
 - authenticates with a **bearer API key** and retries `429`/`503` with backoff
   (honoring `Retry-After`),
 - syncs incrementally via the service's `?since=<ms>` **delta** cursor
-  (paging while `has_more` is true), splitting changed vs. soft-deleted rows,
+  (paging while `has_more` is true), splitting changed vs. soft-deleted rows;
+  a stale cursor (`410 cursor_expired`, when the service enables a retention
+  window) triggers an automatic full resync,
 - maps **priority** losslessly through the service's `importance` field (1–5),
 - uses **optimistic concurrency** on updates (`If-Unmodified-Since`); on a `409`
   it skips the task for the pass and lets the next reconcile resolve it,

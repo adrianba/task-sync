@@ -113,8 +113,12 @@ engine to a specific provider.
 - **Delta:** `GET /v1/tasks?since=<ms>` returns rows with `since <= last_modified`
   including completed + soft-deleted; page while `has_more` is true, passing the
   returned `cursor` as the next `since`. The lower bound is **inclusive** (the
-  boundary row is re-delivered) → stay idempotent. The adapter always pages via
-  `since` from 0 (delta mode) and filters `is_deleted` for `listTasks`.
+  boundary row is re-delivered) → stay idempotent. The **first page / full
+  resync omits `since`** (active mode, excludes deleted) — required because the
+  service can reject a stale/zero `since` with `410 cursor_expired` when
+  `CURSOR_MAX_AGE_MS` is enabled; continuation pages pass the numeric cursor.
+  A `410 cursor_expired` mid-sync discards the token and full-resyncs (parity
+  with Graph `410 Gone`).
 - **Inbox = `list_id: null`**; the adapter maps it to/from `INBOX_ID` (`""`).
 - **Priority round-trips** via the service's `importance` field (int 1–5/null).
 - **Optimistic concurrency:** updates send `If-Unmodified-Since: <ms>` from the

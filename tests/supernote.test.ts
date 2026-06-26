@@ -4,6 +4,7 @@ import {
 } from "../src/adapters/supernote/supernoteAdapter.js";
 import {
   SupernoteConflictError,
+  SupernoteCursorExpiredError,
   type ListTasksOptions,
   type ServiceTask,
   type ServiceTaskCreate,
@@ -140,6 +141,10 @@ class FakeClient implements SupernoteServiceClient {
   public tasks: ServiceTask[] = [];
   public lastUpdate?: { id: string; body: ServiceTaskUpdate; expected?: number };
   public conflictOnUpdate = false;
+  /** When set, a delta `since` strictly below this is rejected as expired. */
+  public cursorMinSince?: number;
+  /** Records the `since` value of every listTasks call (undefined = active). */
+  public sinceCalls: (number | undefined)[] = [];
 
   listLists(): Promise<ServiceTaskList[]> {
     return Promise.resolve(this.lists);
@@ -157,6 +162,14 @@ class FakeClient implements SupernoteServiceClient {
     return Promise.resolve(created);
   }
   listTasks(options: ListTasksOptions): Promise<ServiceTaskPage> {
+    this.sinceCalls.push(options.since);
+    if (
+      options.since !== undefined &&
+      this.cursorMinSince !== undefined &&
+      options.since < this.cursorMinSince
+    ) {
+      return Promise.reject(new SupernoteCursorExpiredError("cursor_expired", "{}"));
+    }
     const deltaMode = options.since !== undefined;
     const since = options.since ?? 0;
     const inInbox = options.inbox === true;
@@ -273,7 +286,22 @@ describe("SupernoteAdapter", () => {
     ).rejects.toBeInstanceOf(ExternalConflictError);
   });
 
-  it("splits delta results into changed and removed", async () => {
+  it("splits delta results into changed and removed when given a cursor", async () => {
+    const client = new FakeClient();
+    client.tasks = [
+      svcTask({ id: "1".repeat(32), title: "Keep", last_modified: 10 }),
+      svcTask({ id: "2".repeat(32), title: "Gone", last_modified: 20, is_deleted: true }),
+    ];
+    const adapter = makeAdapter(client);
+    const res = await adapter.delta!("", "5");
+    expect(res.changed.map((t) => t.externalId)).toEqual(["1".repeat(32)]);
+    expect(res.removedIds).toEqual(["2".repeat(32)]);
+    expect(res.token).toBe("6");
+    // An incremental delta must use the numeric cursor (delta mode).
+    expect(client.sinceCalls).toEqual([5]);
+  });
+
+  it("does a full active resync (no since, excludes deleted) on first delta", async () => {
     const client = new FakeClient();
     client.tasks = [
       svcTask({ id: "1".repeat(32), title: "Keep", last_modified: 10 }),
@@ -282,7 +310,19 @@ describe("SupernoteAdapter", () => {
     const adapter = makeAdapter(client);
     const res = await adapter.delta!("", undefined);
     expect(res.changed.map((t) => t.externalId)).toEqual(["1".repeat(32)]);
-    expect(res.removedIds).toEqual(["2".repeat(32)]);
-    expect(res.token).toBe("1");
+    expect(res.removedIds).toEqual([]);
+    // The first page must omit `since` so it is valid even under CURSOR_MAX_AGE_MS.
+    expect(client.sinceCalls).toEqual([undefined]);
+  });
+
+  it("recovers from an expired cursor with a full resync", async () => {
+    const client = new FakeClient();
+    client.cursorMinSince = 1000;
+    client.tasks = [svcTask({ id: "1".repeat(32), title: "Keep", last_modified: 10 })];
+    const adapter = makeAdapter(client);
+    const res = await adapter.delta!("", "5");
+    expect(res.changed.map((t) => t.externalId)).toEqual(["1".repeat(32)]);
+    // First the stale cursor (5) is rejected, then a full resync with no since.
+    expect(client.sinceCalls).toEqual([5, undefined]);
   });
 });

@@ -10,6 +10,7 @@ import type {
 import { ExternalConflictError } from "../types.js";
 import {
   SupernoteConflictError,
+  SupernoteCursorExpiredError,
   SupernoteHttpClient,
   type ListTasksOptions,
   type ServiceTask,
@@ -75,8 +76,11 @@ export class SupernoteAdapter implements SyncAdapter {
   }
 
   public async listTasks(listId: string): Promise<ExternalTask[]> {
-    const tasks = await this.collectPages(listId);
-    return tasks.filter((task) => !task.is_deleted).map(taskFromService);
+    // Full active snapshot: start in active mode (no `since`, excludes deleted)
+    // and page with the returned cursor. Filter any soft-deleted rows that a
+    // continuation (delta-mode) page may include.
+    const { byId } = await this.pageFrom(listId, undefined);
+    return [...byId.values()].filter((task) => !task.is_deleted).map(taskFromService);
   }
 
   public async getTask(listId: string, externalId: string): Promise<ExternalTask | null> {
@@ -123,26 +127,34 @@ export class SupernoteAdapter implements SyncAdapter {
   }
 
   public async delta(listId: string, token?: string): Promise<DeltaResult> {
-    const sinceMs = token === undefined ? 0 : Number(token);
-    const safeSinceMs = Number.isFinite(sinceMs) && sinceMs > 0 ? sinceMs : 0;
+    const sinceMs = token === undefined ? undefined : Number(token);
+    const safeSinceMs = sinceMs !== undefined && Number.isFinite(sinceMs) && sinceMs > 0
+      ? sinceMs
+      : undefined;
 
-    // Accumulate by id so the inclusive-boundary re-delivery and any
-    // change-then-delete within the window collapse to the latest row (the
-    // service returns rows ordered by last_modified ASC).
-    const byId = new Map<string, ServiceTask>();
-    let since = safeSinceMs;
-    let cursor = safeSinceMs;
-    for (;;) {
-      const page = await this.client.listTasks({
-        ...listFilter(listId),
-        since,
-        includeCompleted: true,
-      });
-      for (const task of page.tasks) byId.set(task.id, task);
-      cursor = page.cursor;
-      if (!page.has_more) break;
-      since = page.cursor;
+    try {
+      return await this.collectDelta(listId, safeSinceMs);
+    } catch (err) {
+      if (err instanceof SupernoteCursorExpiredError && safeSinceMs !== undefined) {
+        // The stored cursor aged out of the service's retention window; discard
+        // it and perform a full resync (no `since`), mirroring the Microsoft
+        // Graph `410 Gone` delta path.
+        this.log.warn("Supernote delta cursor expired; performing full resync", {
+          listId,
+          cursor: token,
+        });
+        return await this.collectDelta(listId, undefined);
+      }
+      throw err;
     }
+  }
+
+  /**
+   * Page the task list from `sinceMs` (undefined = active mode / full resync),
+   * collapsing rows by id, and split changed vs. soft-deleted.
+   */
+  private async collectDelta(listId: string, sinceMs: number | undefined): Promise<DeltaResult> {
+    const { byId, cursor } = await this.pageFrom(listId, sinceMs);
 
     const changed: ExternalTask[] = [];
     const removedIds: string[] = [];
@@ -154,22 +166,33 @@ export class SupernoteAdapter implements SyncAdapter {
     return { changed, removedIds, token: String(cursor) };
   }
 
-  private async collectPages(listId: string): Promise<ServiceTask[]> {
-    // Page via the `since` cursor from 0 so pagination stays in a single
-    // (delta) mode throughout; callers filter soft-deleted rows as needed.
+  /**
+   * Drive the service's `since`/`has_more` pagination. The first page uses
+   * `sinceMs` as given — `undefined` keeps it in active mode (excludes deleted)
+   * which is also the only valid "full resync" when the service enforces
+   * `CURSOR_MAX_AGE_MS` (a numeric `since` of 0 would be rejected). Continuation
+   * pages always pass the numeric cursor (delta mode). Rows are accumulated by
+   * id so the inclusive-boundary re-delivery collapses to the latest row.
+   */
+  private async pageFrom(
+    listId: string,
+    sinceMs: number | undefined,
+  ): Promise<{ byId: Map<string, ServiceTask>; cursor: number }> {
     const byId = new Map<string, ServiceTask>();
-    let since = 0;
+    let since = sinceMs;
+    let cursor = sinceMs ?? 0;
     for (;;) {
       const page = await this.client.listTasks({
         ...listFilter(listId),
-        since,
+        ...(since !== undefined ? { since } : {}),
         includeCompleted: true,
       });
       for (const task of page.tasks) byId.set(task.id, task);
+      cursor = page.cursor;
       if (!page.has_more) break;
       since = page.cursor;
     }
-    return [...byId.values()];
+    return { byId, cursor };
   }
 }
 
