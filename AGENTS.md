@@ -10,7 +10,7 @@ A **production** TypeScript/Node background service that syncs Obsidian
 several backends at once). Backends shipped:
 
 - **Microsoft To Do** (Microsoft Graph)
-- **Supernote To Do** (Supernote Private Cloud MariaDB)
+- **Supernote To Do** (via the `supernote-task-service` REST API)
 
 Read [`README.md`](README.md) for usage and [`docs/strategy-report.md`](docs/strategy-report.md)
 for design rationale.
@@ -64,7 +64,7 @@ SyncEngine (incremental, per-file, 3-way reconcile, multi-target fan-out)
    └─ sync/backendRegistry → SyncAdapter[] (generic interface)
         ├─ adapters/msTodo    → GraphClient → Microsoft Graph (delta)
         │                       └─ auth (MSAL) → encrypted token cache (AES-GCM)
-        └─ adapters/supernote → MariaDB (mysql2) t_schedule_task / _group
+        └─ adapters/supernote → SupernoteHttpClient → supernote-task-service (/v1)
 ```
 
 The `SyncEngine` depends only on the generic `SyncAdapter`
@@ -102,28 +102,38 @@ engine to a specific provider.
 - MSAL `/common` + device code can fail `AADSTS90133` for some personal
   accounts → auth-code + PKCE fallback.
 
-### Supernote (MariaDB)
-- Tables: `t_schedule_task` (tasks) and `t_schedule_task_group` (lists). **Inbox
-  = `task_list_id IS NULL`** (no row for it).
-- **Always filter `is_deleted = 'N'`**; use **soft deletes** only.
-- **Timestamps are Unix epoch in milliseconds**.
-- Status is only `needsAction` / `completed`.
-- Task/list IDs are **32-char lowercase hex** (`randomUUID().replace(/-/g,'')`).
-- DB charset is 3-byte `utf8`: **encode emoji as `[U+XXXX]`** before writing,
-  decode on read; `detail` is `varchar(255)` — truncate **after** encoding.
-- **Preserve the `links` column** on updates (Base64 notebook link).
-- Scope all queries/inserts by `user_id`.
-- **Parameterized queries only** (mysql2 placeholders). Never string-concatenate.
-- Connectivity: primary = same Docker network (host = container name); TCP
-  host:port fallback.
+### Supernote (supernote-task-service HTTP API)
+- task-sync talks to [`adrianba/supernote-task-service`](https://github.com/adrianba/supernote-task-service)
+  over `/v1/tasks` + `/v1/lists`; it no longer touches MariaDB directly. The
+  service owns emoji `[U+XXXX]` encoding, `links` preservation, soft deletes, ms
+  timestamps, column limits, and `user_id` scoping.
+- **Auth:** bearer **API key** (`SUPERNOTE_API_KEY`); base URL
+  `SUPERNOTE_SERVICE_URL`. Client uses global `fetch` + `AbortSignal.timeout`,
+  retries `429`/`503` with backoff honoring `Retry-After`.
+- **Delta:** `GET /v1/tasks?since=<ms>` returns rows with `since <= last_modified`
+  including completed + soft-deleted; page while `has_more` is true, passing the
+  returned `cursor` as the next `since`. The lower bound is **inclusive** (the
+  boundary row is re-delivered) → stay idempotent. The adapter always pages via
+  `since` from 0 (delta mode) and filters `is_deleted` for `listTasks`.
+- **Inbox = `list_id: null`**; the adapter maps it to/from `INBOX_ID` (`""`).
+- **Priority round-trips** via the service's `importance` field (int 1–5/null).
+- **Optimistic concurrency:** updates send `If-Unmodified-Since: <ms>` from the
+  freshly-read `lastModified`; a `409` surfaces as `ExternalConflictError`
+  (`src/adapters/types.ts`) which the engine catches and defers. Deletes are
+  unconditional (vault-wins deletion should win).
+- **Not round-tripped:** completed (`done`) date and a task `start` date — the
+  service sets completion time itself and has no start-date column.
+- IDs are still **32-char lowercase hex**; status is `needsAction` / `completed`.
+- The injectable `SupernoteServiceClient` interface (`adapters/supernote/client.ts`)
+  keeps the adapter unit-testable with a fake — **no network in tests**.
 
 ## Testing approach
 
 - Pure modules have direct unit tests. The engine is tested end-to-end with an
   in-memory fake adapter (`tests/helpers/fakeAdapter.ts`) — no network/DB.
 - Synthetic vault fixtures live under `tests/fixtures/vault`.
-- Live integration tests (Graph, MariaDB) are credential-gated and skipped
-  unless the relevant env vars are set.
+- Live integration tests (Graph, supernote-task-service) are credential-gated
+  and skipped unless the relevant env vars are set.
 
 ## When extending
 

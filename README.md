@@ -6,7 +6,7 @@ markdown tasks, and **bidirectionally synchronizes** them with multiple external
 task managers:
 
 - **Microsoft To Do** (via Microsoft Graph, delta queries)
-- **Supernote To Do** (Supernote Private Cloud MariaDB)
+- **Supernote To Do** (via the [`supernote-task-service`](https://github.com/adrianba/supernote-task-service) REST API)
 
 A single vault task can **fan out to several backends at once**. The service is
 designed to run as a long-lived daemon inside a **Docker container**.
@@ -49,7 +49,7 @@ SyncEngine  (incremental, per-file; multi-target fan-out; 3-way reconcile)
    ├─ state/stateStore     baseline hashes + links keyed by (syncId, backend)
    └─ BackendRegistry      fan-out to N SyncAdapters
          ├─ msTodo     → Microsoft Graph (delta) ← MSAL → AES-GCM token cache
-         └─ supernote  → MariaDB (t_schedule_task / _group)
+         └─ supernote  → supernote-task-service (HTTP /v1, API key, delta)
 ```
 
 - The vault is parsed with a **unified / remark** pipeline (`remark-parse` +
@@ -73,7 +73,7 @@ rationale and [`AGENTS.md`](./AGENTS.md) for architecture and conventions.
 - **Docker** (for the recommended deployment)
 - A backend to sync with:
   - Microsoft To Do: an **Entra ID (Azure AD) app registration** (public client)
-  - Supernote To Do: access to a **Supernote Private Cloud MariaDB** instance
+  - Supernote To Do: a running [`supernote-task-service`](https://github.com/adrianba/supernote-task-service) instance and its **API key**
 
 ---
 
@@ -137,8 +137,8 @@ TASK_SYNC_TOKEN_KEY=<32-byte base64 or hex key>
 MS_ENABLED=true
 MS_CLIENT_ID=<your Entra app client id>
 SUPERNOTE_ENABLED=true
-SUPERNOTE_DB_PASSWORD=<db password>
-SUPERNOTE_DOCKER_NETWORK=supernote_default
+SUPERNOTE_SERVICE_URL=https://tasks.example.com
+SUPERNOTE_API_KEY=<service api key>
 ```
 
 ---
@@ -232,34 +232,33 @@ At least one backend must be enabled.
 
 ## Supernote To Do setup
 
-The Supernote backend talks directly to the **Supernote Private Cloud** MariaDB
-database (`t_schedule_task` / `t_schedule_task_group`). The recommended topology
-is to **join the same Docker network** as the MariaDB container so Docker DNS
-resolves it by name; a **TCP host:port** fallback is also supported.
+The Supernote backend talks to a running
+[`supernote-task-service`](https://github.com/adrianba/supernote-task-service)
+over its REST API (`/v1/tasks`, `/v1/lists`). The service owns all direct
+database access, emoji `[U+XXXX]` encoding, `links` preservation, soft deletes,
+ms-epoch timestamps, and `user_id` scoping — task-sync only speaks HTTP.
 
 ```dotenv
 SUPERNOTE_ENABLED=true
-SUPERNOTE_DB_HOST=supernote-mariadb     # container name on the shared network
-SUPERNOTE_DB_PORT=3306
-SUPERNOTE_DB_USER=supernote
-SUPERNOTE_DB_PASSWORD=<password>        # provide via env / Docker secret
-SUPERNOTE_DB_NAME=supernotedb
-SUPERNOTE_USER_ID=1                      # private-cloud user scope
+SUPERNOTE_SERVICE_URL=https://tasks.example.com   # base URL of the service
+SUPERNOTE_API_KEY=<api key>                        # provide via env / Docker secret
+SUPERNOTE_REQUEST_TIMEOUT_MS=15000                 # optional (default 15000)
 ```
-
-In `docker-compose.yml`, attach the service to the Supernote network (the
-example file shows how to find it). For a TCP fallback, set
-`SUPERNOTE_DB_HOST=host.docker.internal` and remove the shared network.
 
 The backend:
 
-- writes **soft deletes only** (`is_deleted='N'` filter; never hard-deletes),
-- encodes emoji as `[U+XXXX]` and respects column limits (`detail` 255 chars
-  after encoding, `title` 600), preserving any existing `links`,
-- uses **parameterized queries only** and scopes every operation by `user_id`,
+- authenticates with a **bearer API key** and retries `429`/`503` with backoff
+  (honoring `Retry-After`),
+- syncs incrementally via the service's `?since=<ms>` **delta** cursor
+  (paging while `has_more` is true), splitting changed vs. soft-deleted rows,
+- maps **priority** losslessly through the service's `importance` field (1–5),
+- uses **optimistic concurrency** on updates (`If-Unmodified-Since`); on a `409`
+  it skips the task for the pass and lets the next reconcile resolve it,
 - defaults to a **`vault-wins`** conflict policy (lower-trust backend).
 
-> Use a **least-privilege** DB user limited to the Supernote schedule tables.
+> **Limitations:** the completed (`done`) date and a task `start` date are not
+> round-tripped — the service sets completion time itself and has no start-date
+> column. Recurrence and other rich fields follow the service's own model.
 
 ---
 
@@ -323,8 +322,9 @@ Field-level merge is intentionally **not** performed; see
   logged (logger redaction).
 - The Microsoft token cache is **encrypted at rest** (AES-256-GCM, random IV,
   auth tag) using `TASK_SYNC_TOKEN_KEY`; the file is written with `0600` perms.
-- Supernote access uses **parameterized queries only**, a least-privilege DB
-  user, soft deletes, and per-`user_id` scoping.
+- Supernote access goes through the `supernote-task-service` over HTTPS with a
+  **bearer API key**; the service enforces parameterized queries, soft deletes,
+  and per-`user_id` scoping on its side.
 - All vault writes are **atomic** with optimistic-concurrency checks and a
   compare-and-swap re-read to avoid clobbering concurrent edits.
 - A single backend failure is **isolated**: a backend that fails to initialize is
@@ -410,8 +410,9 @@ The workflow then:
   cleaned up); a task deleted in a backend has its link cleared and, under the
   default vault-wins policy, is re-created from the vault on the next pass.
 - One task maps to **one list per backend**; per-list fan-out is deferred.
-- Supernote `links` (notebook pages) are preserved but not created from the
-  vault.
+- Supernote `links` (notebook pages) are preserved by the service but not
+  created from the vault. The Supernote completed-date and `start` date are not
+  round-tripped (service-side limitations).
 
 ---
 

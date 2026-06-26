@@ -22,6 +22,7 @@ import type {
   ExternalTask,
   ExternalTaskInput,
 } from "../adapters/types.js";
+import { ExternalConflictError } from "../adapters/types.js";
 import type { Logger } from "../logger.js";
 import { parseTasks } from "../vault/document.js";
 import { statusToChar } from "../vault/taskMeta.js";
@@ -416,11 +417,27 @@ export class SyncEngine {
     if (direction === "outbound") {
       result.updatedOutbound++;
       if (this.options.dryRun) return task;
-      const updated = await entry.adapter.updateTask(
-        listId,
-        link.externalId,
-        toInput(task),
-      );
+      let updated: ExternalTask;
+      try {
+        updated = await entry.adapter.updateTask(
+          listId,
+          link.externalId,
+          toInput(task),
+          ext.lastModified,
+        );
+      } catch (err) {
+        if (err instanceof ExternalConflictError) {
+          // The external task changed between our read and write; skip this
+          // pass so the next reconcile resolves it via the conflict policy.
+          result.conflicts++;
+          this.log.warn("Skipped outbound update due to external write conflict", {
+            backend,
+            syncId,
+          });
+          return task;
+        }
+        throw err;
+      }
       await this.persistLink({
         ...link,
         externalListId: listId,

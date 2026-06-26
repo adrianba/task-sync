@@ -35,22 +35,19 @@ const msTodoBackendSchema = z.object({
   tagListMap: tagListMap.default({}),
 });
 
-const supernoteDbSchema = z.object({
-  host: z.string().default("supernote-mariadb"),
-  port: z.number().int().positive().default(3306),
-  user: z.string().default("supernote"),
-  password: z.string().default(""),
-  database: z.string().default("supernotedb"),
-  /** Private-cloud user scope (single-user default). */
-  userId: z.number().int().nonnegative().default(1),
-  /** Optional connection timeout (ms). */
-  connectTimeoutMs: z.number().int().positive().default(10_000),
+const supernoteServiceSchema = z.object({
+  /** Base URL of the supernote-task-service (e.g. https://tasks.example.com). */
+  baseUrl: z.string().default(""),
+  /** API key sent as a Bearer token on every request. */
+  apiKey: z.string().default(""),
+  /** Per-request timeout (ms) for HTTP calls to the service. */
+  requestTimeoutMs: z.number().int().positive().default(15_000),
 });
 
 const supernoteBackendSchema = z.object({
   enabled: z.boolean().default(false),
   conflictPolicy: conflictPolicy.default("vault-wins"),
-  db: supernoteDbSchema,
+  service: supernoteServiceSchema.prefault({}),
   tagListMap: tagListMap.default({}),
 });
 
@@ -87,7 +84,7 @@ const configSchema = z.object({
 export type Config = z.infer<typeof configSchema>;
 export type MsTodoBackendConfig = z.infer<typeof msTodoBackendSchema>;
 export type SupernoteBackendConfig = z.infer<typeof supernoteBackendSchema>;
-export type SupernoteDbConfig = z.infer<typeof supernoteDbSchema>;
+export type SupernoteServiceConfig = z.infer<typeof supernoteServiceSchema>;
 
 /** Deep-merge helper for plain objects (arrays/scalars are replaced). */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -143,15 +140,13 @@ function fromEnv(): Record<string, unknown> {
 
   // Supernote
   const sn: Record<string, unknown> = {};
-  const db: Record<string, unknown> = {};
+  const service: Record<string, unknown> = {};
   if (env.SUPERNOTE_ENABLED) sn.enabled = env.SUPERNOTE_ENABLED === "true";
-  if (env.SUPERNOTE_DB_HOST) db.host = env.SUPERNOTE_DB_HOST;
-  if (env.SUPERNOTE_DB_PORT) db.port = Number(env.SUPERNOTE_DB_PORT);
-  if (env.SUPERNOTE_DB_USER) db.user = env.SUPERNOTE_DB_USER;
-  if (env.SUPERNOTE_DB_PASSWORD) db.password = env.SUPERNOTE_DB_PASSWORD;
-  if (env.SUPERNOTE_DB_NAME) db.database = env.SUPERNOTE_DB_NAME;
-  if (env.SUPERNOTE_USER_ID) db.userId = Number(env.SUPERNOTE_USER_ID);
-  if (Object.keys(db).length > 0) sn.db = db;
+  if (env.SUPERNOTE_SERVICE_URL) service.baseUrl = env.SUPERNOTE_SERVICE_URL;
+  if (env.SUPERNOTE_API_KEY) service.apiKey = env.SUPERNOTE_API_KEY;
+  if (env.SUPERNOTE_REQUEST_TIMEOUT_MS)
+    service.requestTimeoutMs = Number(env.SUPERNOTE_REQUEST_TIMEOUT_MS);
+  if (Object.keys(service).length > 0) sn.service = service;
   if (Object.keys(sn).length > 0) backends.supernote = sn;
 
   if (Object.keys(backends).length > 0) out.backends = backends;
@@ -212,10 +207,17 @@ function validateCrossFields(config: Config): void {
       errors.push("backends.msTodo.clientId (MS_CLIENT_ID) is required when enabled.");
     }
   }
-  if (config.backends.supernote?.enabled && !config.backends.supernote.db.password) {
-    errors.push(
-      "backends.supernote.db.password (SUPERNOTE_DB_PASSWORD) is required when enabled.",
-    );
+  if (config.backends.supernote?.enabled) {
+    if (!config.backends.supernote.service.baseUrl) {
+      errors.push(
+        "backends.supernote.service.baseUrl (SUPERNOTE_SERVICE_URL) is required when enabled.",
+      );
+    }
+    if (!config.backends.supernote.service.apiKey) {
+      errors.push(
+        "backends.supernote.service.apiKey (SUPERNOTE_API_KEY) is required when enabled.",
+      );
+    }
   }
   const anyBackend =
     config.backends.msTodo?.enabled || config.backends.supernote?.enabled;

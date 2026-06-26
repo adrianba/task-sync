@@ -27,15 +27,12 @@ services:
       MS_SCOPES: ${MS_SCOPES:-Tasks.ReadWrite,offline_access,User.Read}
       MS_TOKEN_CACHE_PATH: /data/msal-cache.enc
 
-      # Supernote backend. This example joins the Supernote Docker network below,
-      # so Docker DNS resolves the MariaDB container name directly.
+      # Supernote backend. Point this at a running supernote-task-service
+      # instance and supply its API key (via env / Docker secret).
       SUPERNOTE_ENABLED: ${SUPERNOTE_ENABLED:-false}
-      SUPERNOTE_DB_HOST: ${SUPERNOTE_DB_HOST:-supernote-mariadb}
-      SUPERNOTE_DB_PORT: ${SUPERNOTE_DB_PORT:-3306}
-      SUPERNOTE_DB_USER: ${SUPERNOTE_DB_USER:-supernote}
-      SUPERNOTE_DB_PASSWORD: ${SUPERNOTE_DB_PASSWORD:-}
-      SUPERNOTE_DB_NAME: ${SUPERNOTE_DB_NAME:-supernotedb}
-      SUPERNOTE_USER_ID: ${SUPERNOTE_USER_ID:-1}
+      SUPERNOTE_SERVICE_URL: ${SUPERNOTE_SERVICE_URL:-https://tasks.example.com}
+      SUPERNOTE_API_KEY: ${SUPERNOTE_API_KEY:-}
+      SUPERNOTE_REQUEST_TIMEOUT_MS: ${SUPERNOTE_REQUEST_TIMEOUT_MS:-15000}
 
     volumes:
       # Replace ./vault with your Obsidian vault path. The service reads and writes tasks.
@@ -52,23 +49,5 @@ services:
     # ports:
     #   - "127.0.0.1:8080:8080"
 
-    networks:
-      - supernote
-
-    # TCP fallback if MariaDB publishes 3306 to the host instead of sharing a Docker network:
-    # 1. Remove the networks section above.
-    # 2. Set SUPERNOTE_DB_HOST=host.docker.internal in your environment.
-    # 3. On Linux, uncomment:
-    # extra_hosts:
-    #   - "host.docker.internal:host-gateway"
-
 volumes:
   task-sync-data:
-
-networks:
-  # External network created by the Supernote Private Cloud compose project.
-  # Find yours with:
-  #   docker inspect supernote-mariadb --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}'
-  supernote:
-    external: true
-    name: ${SUPERNOTE_DOCKER_NETWORK:-supernote_default}

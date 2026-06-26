@@ -48,6 +48,19 @@ export interface DeltaResult {
 }
 
 /**
+ * Thrown by an adapter when a conditional write is rejected because the stored
+ * resource changed since the caller's observed `expectedVersion`. The sync
+ * engine treats this as a conflict and defers to its conflict policy on the
+ * next reconcile rather than clobbering the newer external state.
+ */
+export class ExternalConflictError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ExternalConflictError";
+  }
+}
+
+/**
  * A backend integration. Implementations must:
  *  - be safe to call concurrently per-list,
  *  - never throw on transient errors without retry/backoff internally,
@@ -69,12 +82,21 @@ export interface SyncAdapter {
   listTasks(listId: string): Promise<ExternalTask[]>;
   getTask(listId: string, externalId: string): Promise<ExternalTask | null>;
   createTask(listId: string, input: ExternalTaskInput): Promise<ExternalTask>;
+  /**
+   * Apply a partial update. `expectedVersion`, when provided, is the
+   * `lastModified` the caller last observed; backends that support optimistic
+   * concurrency should reject the write (surfacing a backend-specific conflict
+   * error) if the stored resource changed since then. Backends without such
+   * support may ignore it.
+   */
   updateTask(
     listId: string,
     externalId: string,
     patch: Partial<ExternalTaskInput>,
+    expectedVersion?: string,
   ): Promise<ExternalTask>;
-  deleteTask(listId: string, externalId: string): Promise<void>;
+  /** Delete a task; `expectedVersion` has the same semantics as `updateTask`. */
+  deleteTask(listId: string, externalId: string, expectedVersion?: string): Promise<void>;
 
   /** Incremental change pull for a list, given a previous token (if any). */
   delta?(listId: string, token?: string): Promise<DeltaResult>;

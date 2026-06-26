@@ -34,13 +34,13 @@ describe("config/loadConfig", () => {
     ).toThrow(/tokenKey|clientId/);
   });
 
-  it("requires a db password when supernote is enabled", () => {
+  it("requires service url and api key when supernote is enabled", () => {
     expect(() =>
       loadConfig({
         skipEnv: true,
-        overrides: { vaultPath: "/vault", backends: { supernote: { enabled: true, db: {} } } },
+        overrides: { vaultPath: "/vault", backends: { supernote: { enabled: true } } },
       }),
-    ).toThrow(/password/);
+    ).toThrow(/baseUrl|apiKey/);
   });
 
   it("accepts a fully-configured supernote backend with vault-wins default", () => {
@@ -48,11 +48,17 @@ describe("config/loadConfig", () => {
       skipEnv: true,
       overrides: {
         vaultPath: "/vault",
-        backends: { supernote: { enabled: true, db: { password: "pw" } } },
+        backends: {
+          supernote: {
+            enabled: true,
+            service: { baseUrl: "https://tasks.example.com", apiKey: "key" },
+          },
+        },
       },
     });
     expect(cfg.backends.supernote?.conflictPolicy).toBe("vault-wins");
-    expect(cfg.backends.supernote?.db.host).toBe("supernote-mariadb");
+    expect(cfg.backends.supernote?.service.baseUrl).toBe("https://tasks.example.com");
+    expect(cfg.backends.supernote?.service.requestTimeoutMs).toBe(15_000);
   });
 
   it("layers overrides over defaults (overrides win)", () => {

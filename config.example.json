@@ -28,12 +28,9 @@
     "supernote": {
       "enabled": false,
       "conflictPolicy": "vault-wins",
-      "db": {
-        "host": "supernote-mariadb",
-        "port": 3306,
-        "user": "supernote",
-        "database": "supernotedb",
-        "userId": 1
+      "service": {
+        "baseUrl": "https://tasks.example.com",
+        "requestTimeoutMs": 15000
       },
       "tagListMap": {}
     }
