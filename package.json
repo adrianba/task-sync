@@ -1,6 +1,6 @@
 {
   "name": "task-sync",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Production background service that bidirectionally syncs Obsidian Tasks-plugin markdown with multiple external task managers (Microsoft To Do, Supernote To Do).",
   "type": "module",
   "main": "dist/index.js",
