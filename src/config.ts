@@ -71,7 +71,8 @@ const configSchema = z.object({
   tags: z
     .array(z.string())
     .default(["todo"])
-    .transform((arr) => arr.map((t) => t.trim().replace(/^#/, "").toLowerCase()).filter((t) => t !== "")),
+    .transform((arr) => arr.map((t) => t.trim().replace(/^#/, "").toLowerCase()).filter((t) => t !== ""))
+    .refine((arr) => arr.length > 0, "tags must contain at least one non-empty tag"),
   watchDebounceMs: z.number().int().positive().default(300),
   /** Default conflict policy; each backend may override. */
   conflictPolicy: conflictPolicy.default("newer"),

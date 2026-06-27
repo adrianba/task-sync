@@ -81,6 +81,12 @@ describe("config/loadConfig", () => {
     expect(cfg.tags).toEqual(["todo"]);
   });
 
+  it("rejects an empty defined tag set", () => {
+    expect(() =>
+      loadConfig({ skipEnv: true, overrides: { ...base, tags: [] } }),
+    ).toThrow(/tags must contain at least one non-empty tag/u);
+  });
+
   it("parses TASK_SYNC_TODO_TAGS (comma-separated, strips '#', lowercases)", () => {
     const prev = process.env.TASK_SYNC_TODO_TAGS;
     process.env.TASK_SYNC_TODO_TAGS = "#Todo, Work ,, Home";

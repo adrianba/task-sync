@@ -59,6 +59,16 @@ describe("resolveBlockTags", () => {
     expect(tagsFor(md, ["ToDo"])).toEqual({ 1: "todo/work" });
   });
 
+  it("matches non-ASCII Obsidian tag tokens", () => {
+    const md = "#tödö/mañana\n- [ ] a\n";
+    expect(tagsFor(md, ["tödö"])).toEqual({ 1: "tödö/mañana" });
+  });
+
+  it("does not let a task line govern a nested checklist", () => {
+    const md = "- [ ] parent #todo\n  - [ ] child\n";
+    expect(tagsFor(md, ["todo"])).toEqual({});
+  });
+
   it("returns nothing when no tags are defined", () => {
     const md = "#todo\n- [ ] a\n";
     expect(tagsFor(md, [])).toEqual({});

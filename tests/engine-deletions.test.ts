@@ -133,6 +133,22 @@ describe("SyncEngine deletion reconciliation", () => {
     expect(store.allLinks()).toHaveLength(1);
   });
 
+  it("skips the deletion sweep when no defined tags are configured", async () => {
+    const file = join(vault, "Work.md");
+    await writeFile(file, "#todo\n- [ ] Keep me\n");
+    const adapter = new DeletionAwareAdapter("alpha");
+    const { engine, store } = await newEngine([entry(adapter)]);
+    await engine.reconcile();
+
+    const misconfigured = await newEngine([entry(adapter)], { definedTags: [] });
+    const result = await misconfigured.engine.reconcile();
+
+    expect(result.deletedExternal).toBe(0);
+    expect(adapter.deleteCalls).toHaveLength(0);
+    expect(adapter.allTasks()).toHaveLength(1);
+    expect(store.allLinks()).toHaveLength(1);
+  });
+
   it("removes stale links reported by delta removedIds", async () => {
     const file = join(vault, "Work.md");
     await writeFile(file, "#todo\n- [ ] Deleted externally\n");

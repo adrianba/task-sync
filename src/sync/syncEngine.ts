@@ -25,7 +25,7 @@ import type {
 import { ExternalConflictError } from "../adapters/types.js";
 import type { Logger } from "../logger.js";
 import { parseTasks, parseTree } from "../vault/document.js";
-import { resolveBlockTags } from "../vault/blocks.js";
+import { normalizeTag, resolveBlockTags } from "../vault/blocks.js";
 import { statusToChar } from "../vault/taskMeta.js";
 import {
   resolveListKey,
@@ -192,6 +192,10 @@ export class SyncEngine {
     return resolveListKey(task, { tagListMap: entry.tagListMap });
   }
 
+  private hasDefinedTags(): boolean {
+    return this.options.definedTags.some((tag) => normalizeTag(tag) !== "");
+  }
+
   // --- public entry points ------------------------------------------------
 
   /** Run a full reconciliation pass over the whole vault. */
@@ -200,9 +204,13 @@ export class SyncEngine {
     const filesResult = await this.reconcileFiles(files, false);
     const result = filesResult.result;
     if (!this.options.dryRun && !filesResult.hadReadError) {
-      result.deletedExternal += await this.deleteExternalTasksMissingFromVault(
-        filesResult.seenSyncIds,
-      );
+      if (this.hasDefinedTags()) {
+        result.deletedExternal += await this.deleteExternalTasksMissingFromVault(
+          filesResult.seenSyncIds,
+        );
+      } else {
+        this.log.error("Skipping deletion sweep because no defined task tags are configured");
+      }
     }
     result.inboundCreated += await this.pullInbound();
     // Ordering is a list-global property, so it runs in the full pass (after
@@ -656,7 +664,7 @@ export class SyncEngine {
     const backend = entry.adapter.backend;
     const tag = listNameToTag(listName, entry.tagListMap);
     const main = tag.split("/", 1)[0] ?? tag;
-    if (!this.options.definedTags.includes(main)) {
+    if (!this.options.definedTags.some((defined) => normalizeTag(defined) === main)) {
       this.log.debug("Skipping inbound task from non-defined list", { backend, listName, tag });
       return false;
     }
@@ -1013,4 +1021,3 @@ function mergeInbound(task: Task, ext: ExternalTask): Task {
     fields,
   };
 }
-

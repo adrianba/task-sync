@@ -16,8 +16,8 @@ import { visit } from "unist-util-visit";
 import { toString } from "mdast-util-to-string";
 import type { Nodes, Parent, Root } from "mdast";
 
-/** A tag token: leading `#`, then tag characters; matched away from word chars. */
-const TAG_TOKEN = /(?:^|\s)#([A-Za-z0-9_][A-Za-z0-9_/-]*)/g;
+/** A tag token: leading `#`, then Obsidian-style tag characters. */
+const TAG_TOKEN = /(?:^|\s)#([^ !@#$%^&*(),.?":{}|<>]+)/gu;
 
 /** Normalize a configured/parsed tag: drop leading '#', trim, lowercase. */
 export function normalizeTag(tag: string): string {
@@ -46,7 +46,7 @@ function walk(parent: Parent, defined: Set<string>, result: Map<number, string>)
   for (let i = 0; i < children.length; i++) {
     const node = children[i] as Nodes;
 
-    if (node.type === "heading" || node.type === "paragraph") {
+    if ((node.type === "heading" || node.type === "paragraph") && !isTaskItemBody(parent, node)) {
       const tag = firstDefinedTag(toString(node), defined);
       const next = children[i + 1];
       if (tag !== undefined && next?.type === "list") {
@@ -60,6 +60,14 @@ function walk(parent: Parent, defined: Set<string>, result: Map<number, string>)
       walk(node, defined, result);
     }
   }
+}
+
+function isTaskItemBody(parent: Parent, node: Nodes): boolean {
+  return (
+    parent.type === "listItem" &&
+    typeof (parent as { checked?: unknown }).checked === "boolean" &&
+    parent.children[0] === node
+  );
 }
 
 /** Map every list item line in `list` (incl. nested) to `tag`. */
