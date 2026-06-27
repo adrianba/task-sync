@@ -36,6 +36,10 @@ services:
       TASK_SYNC_STATE_PATH: /data/state.json
       TASK_SYNC_LOG_LEVEL: ${TASK_SYNC_LOG_LEVEL:-info}
 
+      # Tags ignored when choosing a list (comma-separated, e.g. status/context
+      # tags). Without this, a task is routed to a list named after its first tag.
+      TASK_SYNC_IGNORE_TAGS: ${TASK_SYNC_IGNORE_TAGS:-}
+
       # Required when Microsoft To Do is enabled. Provide a 32-byte base64 or hex AES key.
       TASK_SYNC_TOKEN_KEY: ${TASK_SYNC_TOKEN_KEY:-}
 
@@ -52,6 +56,8 @@ services:
       SUPERNOTE_SERVICE_URL: ${SUPERNOTE_SERVICE_URL:-https://tasks.example.com}
       SUPERNOTE_API_KEY: ${SUPERNOTE_API_KEY:-}
       SUPERNOTE_REQUEST_TIMEOUT_MS: ${SUPERNOTE_REQUEST_TIMEOUT_MS:-15000}
+      # Optional per-backend tag → list-name map (JSON), e.g. {"work":"Work"}.
+      SUPERNOTE_TAG_LIST_MAP: ${SUPERNOTE_TAG_LIST_MAP:-}
 
     # The container runs as UID:GID 1000:1000 (the image's `node` user) by
     # default. If your host vault is owned by a different user, writes fail with

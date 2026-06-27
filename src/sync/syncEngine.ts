@@ -151,6 +151,19 @@ export class SyncEngine {
     return tasks;
   }
 
+  /**
+   * Resolve the external list name for a task **per backend**, applying the
+   * global strategy/ignoreTags but that backend's own `tagListMap`. This keeps
+   * one backend's tag→list overrides from leaking into another and lets the
+   * same task land in differently-named lists per backend.
+   */
+  private resolveListForBackend(task: Task, entry: BackendEntry): string {
+    return resolveListKey(task, {
+      ...this.options.mapping,
+      tagListMap: entry.tagListMap,
+    });
+  }
+
   // --- public entry points ------------------------------------------------
 
   /** Run a full reconciliation pass over the whole vault. */
@@ -342,7 +355,7 @@ export class SyncEngine {
     const syncId = task.syncId;
     if (!syncId) return task;
 
-    const listName = task.listKey ?? "Inbox";
+    const listName = this.resolveListForBackend(task, entry);
     const curHash = hashTask(task);
     const link = this.store.getLink(syncId, backend);
 

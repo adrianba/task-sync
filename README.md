@@ -194,6 +194,7 @@ shape.
 | `vaultPath` | `TASK_SYNC_VAULT_PATH` | `/vault` | Path to the Obsidian vault. |
 | `statePath` | `TASK_SYNC_STATE_PATH` | `/data/state.json` | Sync state file. |
 | `listMapping` | `TASK_SYNC_LIST_MAPPING` | `hybrid` | `tag` \| `file` \| `hybrid`. |
+| `ignoreTags` | `TASK_SYNC_IGNORE_TAGS` | `[]` | Tags ignored when choosing a list (comma-separated env). |
 | `conflictPolicy` | `TASK_SYNC_CONFLICT_POLICY` | `newer` | Default policy (per-backend overridable). |
 | `inboundInboxFile` | `TASK_SYNC_INBOX_FILE` | `Sync Inbox.md` | Note that receives externally-created tasks. |
 | `watchDebounceMs` | — | `300` | Debounce window for file changes. |
@@ -243,6 +244,7 @@ At least one backend must be enabled.
 | `MS_AUTHORITY` | `https://login.microsoftonline.com/common` | Authority URL. |
 | `MS_SCOPES` | `Tasks.ReadWrite,offline_access,User.Read` | Delegated scopes (comma-separated). |
 | `MS_TOKEN_CACHE_PATH` | `/data/msal-cache.enc` | Encrypted token cache location. |
+| `MS_TAG_LIST_MAP` | — | JSON `{tag: listName}` for this backend (see List mapping). |
 
 ---
 
@@ -259,6 +261,7 @@ SUPERNOTE_ENABLED=true
 SUPERNOTE_SERVICE_URL=https://tasks.example.com   # base URL of the service
 SUPERNOTE_API_KEY=<api key>                        # provide via env / Docker secret
 SUPERNOTE_REQUEST_TIMEOUT_MS=15000                 # optional (default 15000)
+SUPERNOTE_TAG_LIST_MAP='{"work":"Work"}'           # optional per-backend tag→list map
 ```
 
 The backend:
@@ -289,13 +292,43 @@ The backend:
 - **`hybrid`** (default) — prefer a known/mapped `#tag`, otherwise fall back to
   the containing file.
 
-Map specific tags to specific external lists per backend via `tagListMap`:
+### How a tag becomes a list
+
+For the `tag` and `hybrid` strategies, resolution runs **per backend** in this
+order:
+
+1. Drop any tags listed in `ignoreTags` (and blank tags) from consideration.
+2. If a remaining tag has an entry in that backend's `tagListMap`, the **first
+   such mapped tag** wins and the list is its mapped name.
+3. Otherwise the **first remaining tag** is used verbatim as the list name.
+4. (`hybrid`/`file` only) With no usable tag, fall back to the containing
+   **folder** name — or, for a note at the vault root, the note's file name.
+5. If nothing resolves, the task goes to **`Inbox`**.
+
+> Because step 3 falls back to the *first* tag on the line, set `ignoreTags` for
+> status/context tags (e.g. `#task`, `#someday`) so they don't accidentally
+> become list names.
+
+Resolution is **per backend**: each backend applies the global strategy and
+`ignoreTags`, but only its **own** `tagListMap`. The same task can therefore land
+in differently-named lists in Microsoft To Do and Supernote, and one backend's
+overrides never leak into another.
+
+Map specific tags to specific external lists per backend via `tagListMap` (config
+file), or the equivalent JSON env var (`MS_TAG_LIST_MAP` /
+`SUPERNOTE_TAG_LIST_MAP`):
 
 ```jsonc
 "backends": {
   "msTodo": { "enabled": true, "clientId": "…",
     "tagListMap": { "work": "Work", "home": "Personal" } }
 }
+```
+
+```bash
+# Env-only deployments (Docker): per-backend maps + ignored tags
+SUPERNOTE_TAG_LIST_MAP='{"work":"Work","home":"Personal"}'
+TASK_SYNC_IGNORE_TAGS="task,someday,next"
 ```
 
 Externally-created tasks that have no vault counterpart are appended to the

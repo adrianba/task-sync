@@ -51,6 +51,7 @@ export class Service {
   private mappingOptions(): MappingOptions {
     return {
       strategy: this.config.listMapping,
+      ignoreTags: this.config.ignoreTags,
       tagListMap: {
         ...this.config.backends.msTodo?.tagListMap,
         ...this.config.backends.supernote?.tagListMap,

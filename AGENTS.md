@@ -82,7 +82,12 @@ engine to a specific provider.
   remark-stringify + unist-util-visit) for document structure (list items,
   checkboxes, code fences) and a pure `taskMeta` module for emoji/Dataview
   field parsing — avoiding fragile hand-rolled markdown parsing.
-- **Hybrid list mapping** (tag first, folder fallback).
+- **Hybrid list mapping** (tag first, folder fallback). List resolution is
+  **per backend**: the global strategy + `ignoreTags` apply, but each backend
+  uses only its own `tagListMap` (`SyncEngine.resolveListForBackend`), so one
+  backend's tag→list overrides never leak into another. Configure ignored tags
+  via `TASK_SYNC_IGNORE_TAGS` and per-backend maps via `MS_TAG_LIST_MAP` /
+  `SUPERNOTE_TAG_LIST_MAP` (or the `tagListMap` config key).
 - **3-way reconciliation** with content hashing on sync-relevant fields only.
   Conflict policy is configurable per backend; default `newer`, **Supernote
   defaults to `vault-wins`** (its device sync is undocumented/last-write-wins).

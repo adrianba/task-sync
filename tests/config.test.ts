@@ -75,4 +75,54 @@ describe("config/loadConfig", () => {
       loadConfig({ skipEnv: true, overrides: { ...base, listMapping: "bogus" } }),
     ).toThrow(/Invalid configuration/);
   });
+
+  it("defaults ignoreTags to an empty array", () => {
+    const cfg = loadConfig({ skipEnv: true, overrides: base });
+    expect(cfg.ignoreTags).toEqual([]);
+  });
+
+  it("parses TASK_SYNC_IGNORE_TAGS (comma-separated, strips '#')", () => {
+    const prev = process.env.TASK_SYNC_IGNORE_TAGS;
+    process.env.TASK_SYNC_IGNORE_TAGS = "#next, someday ,, done";
+    try {
+      const cfg = loadConfig({ overrides: base });
+      expect(cfg.ignoreTags).toEqual(["next", "someday", "done"]);
+    } finally {
+      if (prev === undefined) delete process.env.TASK_SYNC_IGNORE_TAGS;
+      else process.env.TASK_SYNC_IGNORE_TAGS = prev;
+    }
+  });
+
+  it("parses a per-backend tag map from SUPERNOTE_TAG_LIST_MAP JSON", () => {
+    const prev = process.env.SUPERNOTE_TAG_LIST_MAP;
+    process.env.SUPERNOTE_TAG_LIST_MAP = JSON.stringify({ "#work": "Work", home: "Home" });
+    try {
+      const cfg = loadConfig({
+        overrides: {
+          vaultPath: "/vault",
+          backends: {
+            supernote: {
+              enabled: true,
+              service: { baseUrl: "https://tasks.example.com", apiKey: "key" },
+            },
+          },
+        },
+      });
+      expect(cfg.backends.supernote?.tagListMap).toEqual({ work: "Work", home: "Home" });
+    } finally {
+      if (prev === undefined) delete process.env.SUPERNOTE_TAG_LIST_MAP;
+      else process.env.SUPERNOTE_TAG_LIST_MAP = prev;
+    }
+  });
+
+  it("rejects malformed tag-map JSON with a clear error", () => {
+    const prev = process.env.MS_TAG_LIST_MAP;
+    process.env.MS_TAG_LIST_MAP = "not json";
+    try {
+      expect(() => loadConfig({ overrides: base })).toThrow(/MS_TAG_LIST_MAP must be a JSON object/);
+    } finally {
+      if (prev === undefined) delete process.env.MS_TAG_LIST_MAP;
+      else process.env.MS_TAG_LIST_MAP = prev;
+    }
+  });
 });

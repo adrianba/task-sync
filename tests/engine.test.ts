@@ -61,6 +61,24 @@ describe("SyncEngine", () => {
     expect(a.allTasks()[0]!.title).toBe("Write report");
   });
 
+  it("resolves the list per backend using each backend's tagListMap", async () => {
+    await writeFile(join(vault, "Notes.md"), "- [ ] Plan trip #work\n");
+    const a = new FakeAdapter("alpha");
+    const b = new FakeAdapter("beta");
+    const { engine } = await newEngine([
+      { adapter: a, conflictPolicy: "newer", tagListMap: { work: "Alpha Work" } },
+      { adapter: b, conflictPolicy: "newer", tagListMap: { work: "Beta Boulot" } },
+    ]);
+
+    await engine.reconcile();
+
+    const aLists = await a.listLists();
+    const bLists = await b.listLists();
+    expect(aLists.map((l) => l.name)).toContain("Alpha Work");
+    expect(bLists.map((l) => l.name)).toContain("Beta Boulot");
+  });
+
+
   it("is idempotent: a second reconcile makes no further external changes", async () => {
     await writeFile(join(vault, "Work.md"), "- [ ] Task one #work\n");
     const a = new FakeAdapter("alpha");
