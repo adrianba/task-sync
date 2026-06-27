@@ -10,6 +10,22 @@ services:
     # warning and disables zombie reaping.
     restart: unless-stopped
 
+    # Liveness probe against the in-container health endpoint (GET /healthz on
+    # the loopback default). Uses `node` rather than curl/wget so it works on the
+    # slim runtime image regardless of which CLI tools are installed. This mirrors
+    # the Dockerfile HEALTHCHECK; defining it here lets Compose surface container
+    # health (e.g. `docker compose ps`) and gate dependents via `depends_on`.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
     # Optionally load a local .env file containing secrets. Do not commit it.
     # env_file:
     #   - .env
