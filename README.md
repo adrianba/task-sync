@@ -156,6 +156,22 @@ The container is stateless except for two mounts:
 > must be re-done). It will not lose vault data, but may re-create external tasks
 > for links it no longer remembers — back it up.
 
+### File permissions
+
+The container runs as a **non-root user, UID:GID `1000:1000`** (the image's
+`node` user). The bind-mounted `/vault` must therefore be writable by that UID,
+or task-sync fails its reconcile pass with `EACCES: permission denied` when
+writing the atomic temp file (it writes `<!-- sync-id -->` markers back into
+your notes). Choose one:
+
+- **Make the vault writable by `1000`:** `sudo chown -R 1000:1000 /path/to/vault`.
+- **Run as your own user** (keeps vault files owned by you on the host): set
+  `user: "${PUID:-1000}:${PGID:-1000}"` in compose and export `PUID=$(id -u)` /
+  `PGID=$(id -g)` (e.g. via `.env`). When you do this, also switch `/data` from
+  the named volume to a host directory you own (the named volume is initialized
+  as `1000:1000` and a different UID can't write it) — see the commented
+  bind-mount in [`docker-compose.example.yml`](./docker-compose.example.yml).
+
 ---
 
 ## Configuration

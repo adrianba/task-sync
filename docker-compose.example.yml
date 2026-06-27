@@ -37,11 +37,25 @@ services:
       SUPERNOTE_API_KEY: ${SUPERNOTE_API_KEY:-}
       SUPERNOTE_REQUEST_TIMEOUT_MS: ${SUPERNOTE_REQUEST_TIMEOUT_MS:-15000}
 
+    # The container runs as UID:GID 1000:1000 (the image's `node` user) by
+    # default. If your host vault is owned by a different user, writes fail with
+    # "EACCES: permission denied". Pick ONE of:
+    #   (a) make the vault writable by 1000:    sudo chown -R 1000:1000 ./vault
+    #   (b) run as your own user so vault files stay owned by you — uncomment the
+    #       `user:` line below, set PUID/PGID in .env (to `id -u` and `id -g`),
+    #       and switch /data to the bind mount shown below (the default named
+    #       volume is owned by 1000 and a custom user can't write it).
+    # user: "${PUID:-1000}:${PGID:-1000}"
+
     volumes:
       # Replace ./vault with your Obsidian vault path. The service reads and writes tasks.
       - ./vault:/vault
       # Persistent state.json and encrypted MSAL token cache.
       - task-sync-data:/data
+      # When overriding `user:` above, use a host directory you own instead of
+      # the named volume so the service can persist state (create it first with
+      # `mkdir -p ./data`):
+      # - ./data:/data
 
     # The Dockerfile HEALTHCHECK probes GET /healthz on 127.0.0.1:8080 *inside*
     # the container, which works with the secure loopback default.
