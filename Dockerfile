@@ -16,6 +16,9 @@ ENV NODE_ENV=production \
     TASK_SYNC_STATE_PATH=/data/state.json
 
 # tini provides proper PID 1 signal handling (SIGTERM → graceful shutdown).
+# `-s` registers tini as a subreaper so zombie reaping still works (and the
+# "Tini is not running as PID 1" warning is suppressed) even if the container
+# is started under another init, e.g. `docker run --init` or compose `init: true`.
 RUN apk add --no-cache tini
 
 WORKDIR /app
@@ -35,4 +38,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["/sbin/tini", "--", "node", "dist/index.js"]
+ENTRYPOINT ["/sbin/tini", "-s", "--", "node", "dist/index.js"]

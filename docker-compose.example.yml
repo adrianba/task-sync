@@ -4,7 +4,10 @@ services:
       context: .
       dockerfile: Dockerfile
     image: task-sync:latest
-    init: true
+    # No `init: true` here: the image already runs tini as PID 1 (see the
+    # Dockerfile ENTRYPOINT). Adding Docker's own init would demote the image's
+    # tini to a child process, which logs a "Tini is not running as PID 1"
+    # warning and disables zombie reaping.
     restart: unless-stopped
 
     # Optionally load a local .env file containing secrets. Do not commit it.
