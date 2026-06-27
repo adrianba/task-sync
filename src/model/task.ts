@@ -89,5 +89,11 @@ export interface ExternalLink {
   lastKnownHash?: string;
   /** Last external `lastModified` we observed, for change detection. */
   lastExternalModified?: string;
+  /**
+   * Last ordering index we synced for this task in its list (the backend's
+   * `sort`/position). Used to detect vault-vs-device reordering. Only set for
+   * backends that expose an explicit order.
+   */
+  lastKnownSort?: number;
   lastSyncedAt?: string;
 }

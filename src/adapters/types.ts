@@ -25,6 +25,11 @@ export interface ExternalTask {
   start?: IsoDate;
   done?: IsoDate;
   priority?: TaskPriority;
+  /**
+   * 0-based position within its list, for backends that expose an explicit
+   * ordering (e.g. Supernote `sort`). Undefined for backends without ordering.
+   */
+  order?: number;
   /** ISO-8601 timestamp of last modification, used for change detection. */
   lastModified?: string;
 }
@@ -37,6 +42,11 @@ export interface ExternalTaskInput {
   start?: IsoDate;
   done?: IsoDate;
   priority?: TaskPriority;
+  /**
+   * Desired 0-based position within its list. Backends without an ordering
+   * concept ignore it. On create, omit to append at the end.
+   */
+  order?: number;
 }
 
 /** Result of an incremental change pull. */
@@ -69,6 +79,13 @@ export class ExternalConflictError extends Error {
 export interface SyncAdapter {
   /** Stable backend identity, e.g. "ms-todo" or "supernote". */
   readonly backend: string;
+
+  /**
+   * True when the backend exposes an explicit, writable per-list ordering
+   * (`ExternalTask.order` / `ExternalTaskInput.order`). The engine only runs its
+   * ordering reconciliation for such backends; others ignore `order`.
+   */
+  readonly ordered?: boolean;
 
   /** Optional one-time setup (auth, DB connect). Safe to call repeatedly. */
   init?(): Promise<void>;

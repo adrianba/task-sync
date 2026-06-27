@@ -40,6 +40,7 @@ function svcTask(overrides: Partial<ServiceTask> = {}): ServiceTask {
     due: null,
     completed: null,
     importance: null,
+    sort: null,
     last_modified: 0,
     is_deleted: false,
     ...overrides,
@@ -134,6 +135,18 @@ describe("Supernote mapping", () => {
     expect(patchToUpdate({ due: "2026-06-25" })).toEqual({ due: "2026-06-25" });
     expect(patchToUpdate({ priority: "none" })).toEqual({ importance: null });
     expect(patchToUpdate({})).toEqual({});
+  });
+
+  it("round-trips the sort/order position", () => {
+    expect(taskFromService(svcTask({ sort: 3 })).order).toBe(3);
+    expect(taskFromService(svcTask({ sort: 0 })).order).toBe(0);
+    expect(taskFromService(svcTask({ sort: null })).order).toBeUndefined();
+    // Create: explicit index sets sort; omitted appends (no sort key).
+    expect(inputToCreate("l", { title: "T", status: "todo", order: 2 }).sort).toBe(2);
+    expect("sort" in inputToCreate("l", { title: "T", status: "todo" })).toBe(false);
+    // Patch: a number moves the task; absence leaves order unchanged.
+    expect(patchToUpdate({ order: 5 })).toEqual({ sort: 5 });
+    expect("sort" in patchToUpdate({ title: "x" })).toBe(false);
   });
 });
 

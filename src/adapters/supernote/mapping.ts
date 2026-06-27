@@ -90,6 +90,9 @@ export function taskFromService(task: ServiceTask): ExternalTask {
   if (done !== undefined) result.done = done;
   const priority = priorityFromImportance(task.importance);
   if (priority !== undefined) result.priority = priority;
+  if (task.sort !== null && task.sort !== undefined && Number.isFinite(task.sort)) {
+    result.order = task.sort;
+  }
   if (Number.isFinite(task.last_modified) && task.last_modified > 0) {
     result.lastModified = new Date(task.last_modified).toISOString();
   }
@@ -99,13 +102,16 @@ export function taskFromService(task: ServiceTask): ExternalTask {
 
 /** Build a create body from a full input. */
 export function inputToCreate(listId: string, input: ExternalTaskInput): ServiceTaskCreate {
-  return {
+  const body: ServiceTaskCreate = {
     title: input.title,
     list_id: listIdToService(listId),
     status: statusToService(input.status),
     due: input.due ?? null,
     importance: priorityToImportance(input.priority),
   };
+  // Omit `sort` to append at the end; send an explicit 0-based index otherwise.
+  if (input.order !== undefined) body.sort = input.order;
+  return body;
 }
 
 /** Build a PATCH body from a partial input (omitted fields are left unchanged). */
@@ -115,5 +121,7 @@ export function patchToUpdate(patch: Partial<ExternalTaskInput>): ServiceTaskUpd
   if (patch.status !== undefined) body.status = statusToService(patch.status);
   if ("due" in patch) body.due = patch.due ?? null;
   if ("priority" in patch) body.importance = priorityToImportance(patch.priority);
+  // `sort` cannot be cleared (the service ignores null), so only send a number.
+  if (patch.order !== undefined) body.sort = patch.order;
   return body;
 }

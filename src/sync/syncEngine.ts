@@ -35,7 +35,9 @@ import { StateStore, hashTask } from "../state/stateStore.js";
 import {
   applyMutations,
   appendLines,
+  reorderTaskLines,
   type ApplyResult,
+  type ReorderItem,
   type TaskMutation,
 } from "../writer/markdownWriter.js";
 import { resolveConflict } from "./conflict.js";
@@ -63,6 +65,10 @@ export interface ReconcileResult {
   inboundCreated: number;
   deletedExternal: number;
   conflicts: number;
+  /** Tasks whose order was pushed to a backend (sort updates). */
+  reorderedOutbound: number;
+  /** Tasks whose markdown line was moved to reflect a backend's order. */
+  reorderedInbound: number;
 }
 
 function emptyResult(): ReconcileResult {
@@ -74,6 +80,8 @@ function emptyResult(): ReconcileResult {
     inboundCreated: 0,
     deletedExternal: 0,
     conflicts: 0,
+    reorderedOutbound: 0,
+    reorderedInbound: 0,
   };
 }
 
@@ -91,6 +99,23 @@ interface InboundApplyResult {
 interface FetchedExternalTasks {
   changed: ExternalTask[];
   removedIds: string[];
+}
+
+/** A linked vault task participating in per-list ordering reconciliation. */
+interface OrderMember {
+  syncId: string;
+  link: ExternalLink;
+  absPath: string;
+  filePath: string;
+  line: number;
+  expectedLine: string;
+}
+
+/** A parsed file kept in memory for the ordering pass. */
+interface ParsedFile {
+  absPath: string;
+  filePath: string;
+  tasks: Task[];
 }
 
 /** Build an ExternalTaskInput, omitting undefined optional fields. */
@@ -177,6 +202,9 @@ export class SyncEngine {
       );
     }
     result.inboundCreated += await this.pullInbound();
+    // Ordering is a list-global property, so it runs in the full pass (after
+    // field reconcile + inbound creation) when the whole vault is available.
+    if (!this.options.dryRun) await this.reconcileOrdering(files, result);
     if (!this.options.dryRun) await this.store.flush();
     return result;
   }
@@ -642,12 +670,269 @@ export class SyncEngine {
     this.store.setLink(link);
     if (!this.options.dryRun) await this.store.flush();
   }
+
+  // --- ordering reconciliation --------------------------------------------
+
+  /**
+   * Reconcile per-list task ordering for backends that expose an explicit order
+   * (e.g. Supernote `sort`). Vault document order is the desired order; device
+   * reorders are reflected back by physically moving markdown task lines.
+   *
+   * Runs only in the full pass (the whole vault is needed) and only for
+   * `ordered` backends. Ordering is reconciled per **(file, list)** group, so
+   * cross-file interleaving on the device (which markdown cannot represent) does
+   * not cause an outbound/inbound ping-pong; only a file's internal order is
+   * compared and corrected.
+   */
+  private async reconcileOrdering(absFiles: string[], result: ReconcileResult): Promise<void> {
+    const orderedBackends = this.backends.filter((e) => e.adapter.ordered === true);
+    if (orderedBackends.length === 0) return;
+
+    const files = [...absFiles].sort();
+    const parsed: ParsedFile[] = [];
+    for (const abs of files) {
+      const filePath = relative(this.options.vaultPath, abs).split(sep).join("/");
+      try {
+        parsed.push({ absPath: abs, filePath, tasks: await this.parseFile(abs) });
+      } catch (err) {
+        this.log.warn("Ordering: failed to read file; skipping", { file: filePath, err });
+      }
+    }
+
+    for (const entry of orderedBackends) {
+      try {
+        await this.reconcileOrderingForBackend(entry, parsed, result);
+      } catch (err) {
+        this.log.error("Ordering reconcile failed", { backend: entry.adapter.backend, err });
+      }
+    }
+  }
+
+  private async reconcileOrderingForBackend(
+    entry: BackendEntry,
+    parsed: ParsedFile[],
+    result: ReconcileResult,
+  ): Promise<void> {
+    const backend = entry.adapter.backend;
+
+    // Per-list membership in (file path, line) order — array index is the
+    // collision-free global target sort within the list.
+    const byList = new Map<string, OrderMember[]>();
+    for (const file of parsed) {
+      for (const task of file.tasks) {
+        const syncId = task.syncId;
+        if (!syncId) continue;
+        const link = this.store.getLink(syncId, backend);
+        if (!link || link.externalListId === undefined) continue;
+        const members = byList.get(link.externalListId) ?? [];
+        members.push({
+          syncId,
+          link,
+          absPath: file.absPath,
+          filePath: file.filePath,
+          line: task.location.line,
+          expectedLine: task.rawLine,
+        });
+        byList.set(link.externalListId, members);
+      }
+    }
+
+    for (const [listId, members] of byList) {
+      const globalIndex = new Map<string, number>();
+      members.forEach((m, i) => globalIndex.set(m.syncId, i));
+
+      let deviceOrder: Map<string, number>;
+      let deviceModified: Map<string, string>;
+      try {
+        const ext = await entry.adapter.listTasks(listId);
+        deviceOrder = new Map();
+        deviceModified = new Map();
+        for (const t of ext) {
+          if (t.order !== undefined) deviceOrder.set(t.externalId, t.order);
+          if (t.lastModified !== undefined) deviceModified.set(t.externalId, t.lastModified);
+        }
+      } catch (err) {
+        this.log.warn("Ordering: failed to read backend list; skipping", { backend, listId, err });
+        continue;
+      }
+
+      const byFile = new Map<string, OrderMember[]>();
+      for (const m of members) {
+        const arr = byFile.get(m.absPath) ?? [];
+        arr.push(m);
+        byFile.set(m.absPath, arr);
+      }
+      for (const fileMembers of byFile.values()) {
+        await this.reconcileFileOrder(
+          entry,
+          listId,
+          fileMembers,
+          globalIndex,
+          deviceOrder,
+          deviceModified,
+          result,
+        );
+      }
+    }
+  }
+
+  private async reconcileFileOrder(
+    entry: BackendEntry,
+    listId: string,
+    fileMembers: OrderMember[],
+    globalIndex: Map<string, number>,
+    deviceOrder: Map<string, number>,
+    deviceModified: Map<string, string>,
+    result: ReconcileResult,
+  ): Promise<void> {
+    const big = Number.MAX_SAFE_INTEGER;
+    const sortKey = (get: (m: OrderMember) => number) => (a: OrderMember, b: OrderMember) =>
+      get(a) - get(b) || a.line - b.line;
+
+    const vaultRel = fileMembers.map((m) => m.syncId); // document order
+    const baselineRel = [...fileMembers]
+      .sort(sortKey((m) => m.link.lastKnownSort ?? big))
+      .map((m) => m.syncId);
+    const deviceRel = [...fileMembers]
+      .sort(sortKey((m) => deviceOrder.get(m.link.externalId) ?? big))
+      .map((m) => m.syncId);
+
+    const needsEstablish = fileMembers.some((m) => m.link.lastKnownSort === undefined);
+    const vaultChanged = !seqEqual(vaultRel, baselineRel);
+    const deviceChanged = !seqEqual(deviceRel, baselineRel);
+    const devicePrecedence = entry.conflictPolicy === "external-wins";
+
+    let direction: "outbound" | "inbound" | "none" = "none";
+    if (devicePrecedence) {
+      if (deviceChanged) direction = "inbound";
+      else if (vaultChanged || needsEstablish) direction = "outbound";
+    } else {
+      if (vaultChanged || needsEstablish) direction = "outbound";
+      else if (deviceChanged) direction = "inbound";
+    }
+    if (direction === "none") return;
+
+    if (vaultChanged && deviceChanged) {
+      result.conflicts++;
+      this.log.warn("Ordering conflict resolved", {
+        backend: entry.adapter.backend,
+        listId,
+        policy: entry.conflictPolicy,
+        direction,
+      });
+    }
+
+    if (direction === "outbound") {
+      await this.pushOrderOutbound(entry, listId, fileMembers, globalIndex, deviceOrder, deviceModified, result);
+    } else {
+      await this.applyOrderInbound(entry, fileMembers, deviceOrder, result);
+    }
+  }
+
+  /** Push vault document order to the backend as explicit `order` updates. */
+  private async pushOrderOutbound(
+    entry: BackendEntry,
+    listId: string,
+    fileMembers: OrderMember[],
+    globalIndex: Map<string, number>,
+    deviceOrder: Map<string, number>,
+    deviceModified: Map<string, string>,
+    result: ReconcileResult,
+  ): Promise<void> {
+    const backend = entry.adapter.backend;
+    for (const m of fileMembers) {
+      const target = globalIndex.get(m.syncId);
+      if (target === undefined) continue;
+      const current = deviceOrder.get(m.link.externalId);
+
+      // Already at the right position: just record the baseline, no write.
+      if (current === target) {
+        if (m.link.lastKnownSort !== target) {
+          await this.persistLink({ ...m.link, lastKnownSort: target });
+        }
+        continue;
+      }
+
+      try {
+        const updated = await entry.adapter.updateTask(
+          listId,
+          m.link.externalId,
+          { order: target },
+          deviceModified.get(m.link.externalId) ?? m.link.lastExternalModified,
+        );
+        await this.persistLink({
+          ...m.link,
+          lastKnownSort: target,
+          ...(updated.lastModified !== undefined
+            ? { lastExternalModified: updated.lastModified }
+            : {}),
+          lastSyncedAt: new Date().toISOString(),
+        });
+        result.reorderedOutbound++;
+      } catch (err) {
+        if (err instanceof ExternalConflictError) {
+          result.conflicts++;
+          this.log.warn("Skipped outbound reorder due to external write conflict", {
+            backend,
+            syncId: m.syncId,
+          });
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  /** Reorder a file's task lines to match the backend's order. */
+  private async applyOrderInbound(
+    entry: BackendEntry,
+    fileMembers: OrderMember[],
+    deviceOrder: Map<string, number>,
+    result: ReconcileResult,
+  ): Promise<void> {
+    const big = Number.MAX_SAFE_INTEGER;
+    const desired = [...fileMembers].sort(
+      (a, b) =>
+        (deviceOrder.get(a.link.externalId) ?? big) - (deviceOrder.get(b.link.externalId) ?? big) ||
+        a.line - b.line,
+    );
+    const absPath = fileMembers[0]!.absPath;
+    const items: ReorderItem[] = desired.map((m) => ({ line: m.line, expectedLine: m.expectedLine }));
+
+    const res = await reorderTaskLines(absPath, items, {
+      ...(this.options.suppressNext ? { onWillWrite: this.options.suppressNext } : {}),
+    });
+    if (res.conflicts > 0 || res.skippedDueToConcurrentEdit) {
+      result.conflicts += res.conflicts;
+      this.log.warn("Skipped inbound reorder due to concurrent edit", {
+        backend: entry.adapter.backend,
+        absPath,
+      });
+      return;
+    }
+
+    // Align the baseline with the device order so the new markdown order is
+    // stable on the next pass.
+    for (const m of fileMembers) {
+      const sort = deviceOrder.get(m.link.externalId);
+      if (sort === undefined || m.link.lastKnownSort === sort) continue;
+      await this.persistLink({ ...m.link, lastKnownSort: sort, lastSyncedAt: new Date().toISOString() });
+    }
+    if (res.changed) result.reorderedInbound += desired.length;
+  }
 }
 
 import { createHash } from "node:crypto";
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+/** True when two id sequences are element-wise equal. */
+function seqEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 /** Best-effort in-memory merge when re-parsing cannot find the task. */

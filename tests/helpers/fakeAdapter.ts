@@ -14,14 +14,16 @@ import type {
 
 export class FakeAdapter implements SyncAdapter {
   readonly backend: string;
+  readonly ordered: boolean;
   private clock = 1;
   private readonly lists = new Map<string, ExternalList>();
   private readonly tasks = new Map<string, ExternalTask>();
   initCalls = 0;
   closeCalls = 0;
 
-  constructor(backend = "fake") {
+  constructor(backend = "fake", ordered = false) {
     this.backend = backend;
+    this.ordered = ordered;
   }
 
   private now(): string {
@@ -65,6 +67,10 @@ export class FakeAdapter implements SyncAdapter {
       lastModified: this.now(),
       ...input,
     };
+    if (this.ordered && task.order === undefined) {
+      // Mimic Supernote: omitted order appends at the end of the list.
+      task.order = [...this.tasks.values()].filter((t) => t.listId === listId).length;
+    }
     this.tasks.set(task.externalId, task);
     return Promise.resolve(task);
   }

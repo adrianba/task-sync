@@ -29,6 +29,7 @@ designed to run as a long-lived daemon inside a **Docker container**.
 - [Supernote To Do setup](#supernote-to-do-setup)
 - [List mapping & tags](#list-mapping--tags)
 - [Conflict resolution](#conflict-resolution)
+- [Task ordering (Supernote)](#task-ordering-supernote)
 - [Observability](#observability)
 - [Security](#security)
 - [CLI](#cli)
@@ -349,6 +350,31 @@ decides the winner (per-backend overridable):
 
 Field-level merge is intentionally **not** performed; see
 [Limitations](#limitations).
+
+---
+
+## Task ordering (Supernote)
+
+The Supernote backend keeps each list **in the same order as your markdown**, in
+both directions. (Microsoft To Do has no stable ordering API and is unaffected.)
+
+- **Outbound (vault → device):** within a list, tasks are numbered densely in
+  **document order**. When several notes feed one list, files are taken in
+  **vault path order**, then tasks in document order within each file.
+- **Inbound (device → vault):** if you reorder a list on the device, task-sync
+  physically reorders those task lines in the markdown to match — moving only the
+  task lines, leaving headings and blank lines untouched. The rewrite is atomic
+  and loop-protected.
+- **Conflict (both reordered):** **vault-wins** — the markdown order is pushed to
+  the device and the conflict is logged.
+
+Notes:
+
+- Ordering reconciles on the **periodic full pass** (and at startup), not on every
+  individual file-watch event, because it needs the whole vault to project order.
+- Cross-file interleaving on the device cannot be represented in a single file, so
+  per-file relative order is honoured but global cross-file order is grouped by
+  file path. Keep a list in one note if you need exact device order.
 
 ---
 

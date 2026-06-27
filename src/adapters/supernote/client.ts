@@ -35,6 +35,8 @@ export interface ServiceTask {
   due: string | null;
   completed: string | null;
   importance: number | string | null;
+  /** 0-based position within the list (device order). */
+  sort: number | null;
   last_modified: number;
   is_deleted: boolean;
 }
@@ -46,6 +48,8 @@ export interface ServiceTaskCreate {
   status: ServiceTaskStatus;
   due?: string | null;
   importance?: number | null;
+  /** 0-based position; omit to append at the end of the list. */
+  sort?: number;
 }
 
 /** Body accepted when patching a task (omitted fields are left unchanged). */
@@ -55,6 +59,8 @@ export interface ServiceTaskUpdate {
   status?: ServiceTaskStatus;
   due?: string | null;
   importance?: number | null;
+  /** 0-based position to move the task to (null is ignored by the service). */
+  sort?: number;
 }
 
 /** A page of delta results plus the next cursor. */

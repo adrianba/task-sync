@@ -40,6 +40,8 @@ function listFilter(listId: string): Pick<ListTasksOptions, "listId" | "inbox"> 
 
 export class SupernoteAdapter implements SyncAdapter {
   public readonly backend = "supernote";
+  /** Supernote exposes a writable per-list `sort` position. */
+  public readonly ordered = true;
   private readonly client: SupernoteServiceClient;
   private readonly baseUrl: string;
 

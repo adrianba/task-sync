@@ -126,6 +126,25 @@ engine to a specific provider.
   with Graph `410 Gone`).
 - **Inbox = `list_id: null`**; the adapter maps it to/from `INBOX_ID` (`""`).
 - **Priority round-trips** via the service's `importance` field (int 1–5/null).
+- **Task order round-trips** via the service's 0-based per-list `sort` field,
+  surfaced on the generic `ExternalTask.order` (`adapters/types.ts`); the adapter
+  sets `ordered = true`. Engine ordering logic lives in `syncEngine.ts`
+  (`reconcileOrdering` + helpers) and runs only on the **full** `reconcile()`
+  pass (needs the whole vault), not on watcher-driven incremental passes.
+  - Service `sort` semantics: **create** omits it to append or sends an explicit
+    index; **update** sends `sort` to move (`null` is ignored, cannot clear);
+    explicit indices do **not** renumber siblings; list/sync responses are **not**
+    ordered by `sort` (stable `last_modified ASC, task_id ASC`) so we read it per
+    task and order ourselves. We renumber **densely** outbound to avoid collisions.
+  - Unit of ordering is the **(file, list)** group. Outbound numbers files in
+    vault-path order, tasks in document order. Inbound reorders task lines within
+    each file to the device order via `reorderTaskLines` (atomic, optimistic, only
+    permutes the participating task lines). Change detection compares **relative**
+    id sequences (`seqEqual`) so cross-file offsets don't cause false churn.
+  - Conflict (both reordered) → **vault-wins**. `lastKnownSort` on `ExternalLink`
+    (`model/task.ts`) is the per-link baseline; it JSON-round-trips with state.
+  - Limitation: cross-file interleaving on the device is unrepresentable in one
+    file — per-file relative order is honoured, global order is grouped by file path.
 - **Optimistic concurrency:** updates send `If-Unmodified-Since: <ms>` from the
   freshly-read `lastModified`; a `409` surfaces as `ExternalConflictError`
   (`src/adapters/types.ts`) which the engine catches and defers. Deletes are

@@ -133,6 +133,79 @@ export interface AppendOptions {
   dryRun?: boolean;
 }
 
+/** One task line participating in a reorder. */
+export interface ReorderItem {
+  /** Current zero-based line index of the task. */
+  line: number;
+  /** Exact current line text, for optimistic concurrency. */
+  expectedLine: string;
+}
+
+/**
+ * Reorder a set of task lines **among their own positions**, leaving every
+ * other line (headings, blanks, tasks from other lists) byte-for-byte in place.
+ *
+ * `desired` lists the participating task lines in their target relative order.
+ * The lines' current positions are treated as fixed "slots" (sorted ascending);
+ * the desired line texts are placed into those slots in order. This permutes
+ * only the given task lines and is safe for flat (non-nested) task lists.
+ *
+ * Optimistic concurrency: every item's `expectedLine` must still match the
+ * on-disk line at its index, or the whole reorder is skipped (reported as a
+ * conflict) and left for the next reconcile. Atomic via temp + fsync + rename.
+ */
+export async function reorderTaskLines(
+  absPath: string,
+  desired: ReorderItem[],
+  options: ApplyMutationsOptions = {},
+): Promise<ApplyResult> {
+  if (desired.length < 2) return { changed: false, conflicts: 0 };
+
+  const slots = desired.map((d) => d.line).sort((a, b) => a - b);
+
+  for (let attempt = 0; attempt < maxCasAttempts; attempt++) {
+    const original = await readFile(absPath, "utf8");
+    const lines = original.split("\n");
+
+    // Verify every participating line still matches (optimistic concurrency).
+    let mismatch = false;
+    for (const item of desired) {
+      if (lines[item.line] !== item.expectedLine) {
+        mismatch = true;
+        break;
+      }
+    }
+    if (mismatch) return { changed: false, conflicts: desired.length };
+
+    // Place desired texts into the fixed slots in target order.
+    let changed = false;
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i]!;
+      const text = desired[i]!.expectedLine;
+      if (lines[slot] !== text) {
+        lines[slot] = text;
+        changed = true;
+      }
+    }
+
+    if (!changed) return { changed: false, conflicts: 0 };
+    if (options.dryRun) return { changed: true, conflicts: 0 };
+
+    const updated = lines.join("\n");
+    const beforeHook = await readFile(absPath, "utf8");
+    if (beforeHook !== original) continue;
+    options.onWillWrite?.(absPath);
+    const currentOnDisk = await readFile(absPath, "utf8");
+    if (currentOnDisk !== original) continue;
+    await atomicWriteFile(absPath, updated);
+    return { changed: true, conflicts: 0 };
+  }
+
+  return { changed: false, conflicts: 0, skippedDueToConcurrentEdit: true };
+}
+
+
+
 /**
  * Append a block of lines to a file (creating it if needed), ensuring the file
  * ends with a newline first. Used for inbound externally-created tasks routed
