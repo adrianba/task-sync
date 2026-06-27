@@ -43,6 +43,31 @@ export function parseTasks(
   filePath: string,
   definedTags: Iterable<string> = [],
 ): Task[] {
+  return parseDocument(content, filePath, definedTags).tasks;
+}
+
+/** Result of {@link parseDocument}: scoped tasks plus document-level metadata. */
+export interface ParsedDocument {
+  /** In-scope syncable tasks (under a defined-tag block). */
+  tasks: Task[];
+  /**
+   * True if the file contains at least one checkbox list item (`- [ ] …`),
+   * whether or not it is in scope. Lets callers tell a tag *misconfiguration*
+   * (checkboxes present but none governed by a defined tag) apart from a vault
+   * that simply has no tasks.
+   */
+  hasCheckboxItems: boolean;
+}
+
+/**
+ * Parse a document into its scoped tasks and document-level metadata in a single
+ * pass. See {@link parseTasks} for the scoping rules.
+ */
+export function parseDocument(
+  content: string,
+  filePath: string,
+  definedTags: Iterable<string> = [],
+): ParsedDocument {
   const tree = parseTree(content);
   const lines = content.split("\n");
   const blockTags = resolveBlockTags(tree, definedTags);
@@ -58,15 +83,17 @@ export function parseTasks(
   });
 
   const tasks: Task[] = [];
+  let hasCheckboxItems = false;
   for (const index of [...taskLineIndexes].sort((a, b) => a - b)) {
-    const blockTag = blockTags.get(index);
-    if (blockTag === undefined) continue; // out of scope: not under a defined-tag block
-
     const raw = lines[index];
     if (raw === undefined) continue;
 
     const m = raw.match(TASK_LINE);
     if (!m) continue; // a list item, but not a checkbox task
+    hasCheckboxItems = true;
+
+    const blockTag = blockTags.get(index);
+    if (blockTag === undefined) continue; // out of scope: not under a defined-tag block
 
     const statusChar = m[3] ?? " ";
     const body = m[4] ?? "";
@@ -85,5 +112,5 @@ export function parseTasks(
     });
   }
 
-  return tasks;
+  return { tasks, hasCheckboxItems };
 }

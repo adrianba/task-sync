@@ -95,7 +95,11 @@ engine to a specific provider.
   path to a custom list (`MS_TAG_LIST_MAP` / `SUPERNOTE_TAG_LIST_MAP` or the
   `tagListMap` config key); overrides never leak between backends
   (`SyncEngine.resolveListForBackend`). Moving a synced task out of a tagged
-  block deletes its backend task (vault-wins). Inbound tasks are imported only if
+  block deletes its backend task (vault-wins). Two safety guards protect against
+  mass deletion from a tag misconfiguration: the deletion sweep is skipped if
+  `tags` is empty, **and** if a full pass finds checklist items present but none
+  under a defined tag while external links exist (likely a typo'd allow-list).
+  Inbound tasks are imported only if
   their list maps to a defined tag, into an existing block or a new tagged block
   in the Sync Inbox.
 - **3-way reconciliation** with content hashing on sync-relevant fields only.

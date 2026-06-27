@@ -24,7 +24,7 @@ import type {
 } from "../adapters/types.js";
 import { ExternalConflictError } from "../adapters/types.js";
 import type { Logger } from "../logger.js";
-import { parseTasks, parseTree } from "../vault/document.js";
+import { parseDocument, parseTree } from "../vault/document.js";
 import { normalizeTag, resolveBlockTags } from "../vault/blocks.js";
 import { statusToChar } from "../vault/taskMeta.js";
 import {
@@ -94,6 +94,8 @@ interface ReconcileFilesResult {
   result: ReconcileResult;
   seenSyncIds: Set<string>;
   hadReadError: boolean;
+  /** True if any scanned file contained a checkbox item (in scope or not). */
+  sawCheckboxItem: boolean;
 }
 
 interface InboundApplyResult {
@@ -174,12 +176,19 @@ export class SyncEngine {
   }
 
   private parseTasksFromContent(content: string, rel: string): Task[] {
-    const tasks = parseTasks(content, rel, this.options.definedTags);
+    return this.parseDocumentFromContent(content, rel).tasks;
+  }
+
+  private parseDocumentFromContent(
+    content: string,
+    rel: string,
+  ): { tasks: Task[]; hasCheckboxItems: boolean } {
+    const { tasks, hasCheckboxItems } = parseDocument(content, rel, this.options.definedTags);
     for (const t of tasks) {
       const listKey = resolveListKey(t, this.options.mapping);
       if (listKey !== undefined) t.listKey = listKey;
     }
-    return tasks;
+    return { tasks, hasCheckboxItems };
   }
 
   /**
@@ -204,12 +213,24 @@ export class SyncEngine {
     const filesResult = await this.reconcileFiles(files, false);
     const result = filesResult.result;
     if (!this.options.dryRun && !filesResult.hadReadError) {
-      if (this.hasDefinedTags()) {
+      if (!this.hasDefinedTags()) {
+        this.log.error("Skipping deletion sweep because no defined task tags are configured");
+      } else if (filesResult.sawCheckboxItem && filesResult.seenSyncIds.size === 0 && this.store.allLinks().length > 0) {
+        // The vault still contains checklist items, yet none are in scope and
+        // tracked links exist. This is the signature of a tag misconfiguration
+        // (e.g. a typo in `tags`, or the governing tag lines were lost) rather
+        // than an intentional bulk removal — deleting every backend task would
+        // be destructive and hard to recover. Refuse to sweep and tell the
+        // operator. (Genuinely emptying the vault leaves no checkbox items, so
+        // legitimate deletions are unaffected.)
+        this.log.error(
+          "Skipping deletion sweep: vault has checklist items but none are under a defined tag while external links exist (likely a misconfigured 'tags' allow-list)",
+          { definedTags: this.options.definedTags, trackedLinks: this.store.allLinks().length },
+        );
+      } else {
         result.deletedExternal += await this.deleteExternalTasksMissingFromVault(
           filesResult.seenSyncIds,
         );
-      } else {
-        this.log.error("Skipping deletion sweep because no defined task tags are configured");
       }
     }
     result.inboundCreated += await this.pullInbound();
@@ -249,6 +270,7 @@ export class SyncEngine {
     const result = emptyResult();
     const seenSyncIds = new Set<string>();
     let hadReadError = false;
+    let sawCheckboxItem = false;
 
     for (const abs of absPaths) {
       const rel = relative(this.options.vaultPath, abs).split(sep).join("/");
@@ -264,7 +286,9 @@ export class SyncEngine {
       const fileHash = hashContent(content);
       if (useFileHashSkip && this.store.getFileHash(rel) === fileHash) continue;
 
-      let tasks = this.parseTasksFromContent(content, rel);
+      const doc = this.parseDocumentFromContent(content, rel);
+      let tasks = doc.tasks;
+      if (doc.hasCheckboxItems) sawCheckboxItem = true;
 
       // Phase 1: assign missing sync IDs by writing them into the markdown.
       const idAssigned = await this.assignMissingIds(abs, tasks, result);
@@ -296,7 +320,7 @@ export class SyncEngine {
       }
     }
 
-    return { result, seenSyncIds, hadReadError };
+    return { result, seenSyncIds, hadReadError, sawCheckboxItem };
   }
 
   private async deleteExternalTasksMissingFromVault(seenSyncIds: Set<string>): Promise<number> {

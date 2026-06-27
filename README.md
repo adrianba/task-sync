@@ -325,6 +325,13 @@ Rules:
 > out-of-scope item is no longer a tracked task, the next full reconcile treats
 > its previously-synced backend task as removed (vault-wins deletion). Re-tagging
 > it later re-syncs it as a new task.
+>
+> **Safety guard:** if a full reconcile finds the vault *still has checklist
+> items* but **none** are under a defined tag (while external links exist),
+> task-sync logs an error and **skips** the deletion sweep instead of mass-
+> deleting every backend task. This catches a misconfigured `tags` allow-list
+> (e.g. a typo) or lost tag lines. Genuinely emptying the vault (no checkboxes
+> left) is unaffected and still deletes as expected.
 
 ### Renaming a tag to a custom list name (per backend)
 

@@ -162,21 +162,27 @@ describe("SyncEngine", () => {
 
   it("deletes the backend task when a synced item is moved out of a tagged block", async () => {
     const file = join(vault, "Work.md");
-    await writeFile(file, "#todo\n- [ ] Will be untagged\n");
+    // Two tasks under one block; we'll move only the first out of scope so some
+    // tasks remain in scope (the all-out-of-scope case is guarded separately).
+    await writeFile(file, "#todo\n- [ ] Keep me\n- [ ] Will be untagged\n");
     const a = new FakeAdapter("alpha");
     const { engine, store } = await newEngine([entry(a)]);
     await engine.reconcile();
-    expect(a.allTasks()).toHaveLength(1);
-    expect(store.allLinks()).toHaveLength(1);
+    expect(a.allTasks()).toHaveLength(2);
+    expect(store.allLinks()).toHaveLength(2);
 
-    // Drop the governing tag → the item is no longer in scope.
+    // Split the block so the second item is no longer governed by the tag.
     const withId = await readFile(file, "utf8");
-    await writeFile(file, withId.replace(/^#todo\n/, ""));
+    const lines = withId.split("\n");
+    // lines: [#todo, "- [ ] Keep me <id>", "- [ ] Will be untagged <id>", ...]
+    const untagged = lines[2]!;
+    await writeFile(file, `#todo\n${lines[1]!}\n\nplain text\n${untagged}\n`);
 
     const r = await engine.reconcile();
     expect(r.deletedExternal).toBe(1);
-    expect(a.allTasks()).toHaveLength(0);
-    expect(store.allLinks()).toHaveLength(0);
+    expect(a.allTasks()).toHaveLength(1);
+    expect(a.allTasks()[0]!.title).toBe("Keep me");
+    expect(store.allLinks()).toHaveLength(1);
   });
 
   it("dry-run never writes to the vault or backends", async () => {

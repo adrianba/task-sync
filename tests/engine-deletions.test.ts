@@ -116,6 +116,26 @@ describe("SyncEngine deletion reconciliation", () => {
     expect(store.allLinks()).toHaveLength(0);
   });
 
+  it("skips the deletion sweep when the vault still has checklist items but none are in scope", async () => {
+    const file = join(vault, "Work.md");
+    await writeFile(file, "#todo\n- [ ] Keep me safe\n");
+    const adapter = new DeletionAwareAdapter("alpha");
+    const { engine, store } = await newEngine([entry(adapter)]);
+    await engine.reconcile();
+    expect(store.allLinks()).toHaveLength(1);
+
+    // Simulate a tag misconfiguration: the governing tag line is lost, so the
+    // task falls out of scope but the checkbox item is still present.
+    const withId = await readFile(file, "utf8");
+    await writeFile(file, withId.replace(/^#todo\n/, ""));
+    const result = await engine.reconcile();
+
+    expect(result.deletedExternal).toBe(0);
+    expect(adapter.deleteCalls).toHaveLength(0);
+    expect(adapter.allTasks()).toHaveLength(1);
+    expect(store.allLinks()).toHaveLength(1);
+  });
+
   it("skips the deletion sweep if any vault file cannot be read", async () => {
     const file = join(vault, "Work.md");
     await writeFile(file, "#todo\n- [ ] Keep me\n");
