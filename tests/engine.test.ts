@@ -133,6 +133,24 @@ describe("SyncEngine", () => {
     expect(inbox).toMatch(/<!-- sync-id: /);
   });
 
+  it("places multiple inbound tasks from one list under a single tag block in order", async () => {
+    const a = new FakeAdapter("alpha");
+    a.seedTask("personal", { title: "First inbound", status: "todo" });
+    a.seedTask("personal", { title: "Second inbound", status: "todo" });
+    const { engine } = await newEngine([entry(a)], { definedTags: ["personal"] });
+    const created = await engine.pullInbound();
+    expect(created).toBe(2);
+
+    const inbox = await readFile(join(vault, "Sync Inbox.md"), "utf8");
+    // Exactly one #personal block heading.
+    expect(inbox.match(/#personal/g)).toHaveLength(1);
+    const firstIdx = inbox.indexOf("First inbound");
+    const secondIdx = inbox.indexOf("Second inbound");
+    const tagIdx = inbox.indexOf("#personal");
+    expect(firstIdx).toBeGreaterThan(tagIdx);
+    expect(secondIdx).toBeGreaterThan(firstIdx);
+  });
+
   it("skips inbound tasks from lists that are not a defined tag", async () => {
     const a = new FakeAdapter("alpha");
     a.seedTask("Random Device List", { title: "Off-scope", status: "todo" });

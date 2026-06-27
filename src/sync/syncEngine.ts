@@ -98,6 +98,13 @@ interface ReconcileFilesResult {
   sawCheckboxItem: boolean;
 }
 
+/** A resolved insertion point for an inbound task inside an existing tag block. */
+interface BlockAnchor {
+  absPath: string;
+  afterLine: number;
+  expectedLine: string;
+}
+
 interface InboundApplyResult {
   task: Task;
   apply: ApplyResult;
@@ -591,6 +598,11 @@ export class SyncEngine {
     const inboxAbs = join(this.options.vaultPath, this.options.inboundInboxFile);
     let created = 0;
 
+    // Build a tag → insertion-anchor index once per pass instead of re-scanning
+    // the whole vault for every inbound task. The index is mutated in place as
+    // tasks are inserted so subsequent tasks for the same tag chain correctly.
+    const blockIndex = await this.buildBlockIndex();
+
     for (const entry of this.backends) {
       const backend = entry.adapter.backend;
       try {
@@ -600,7 +612,13 @@ export class SyncEngine {
           await this.removeLinksForDeletedExternalTasks(backend, fetched.removedIds);
           for (const ext of fetched.changed) {
             if (this.hasLinkForExternal(backend, ext.externalId)) continue;
-            const didCreate = await this.createInboundTask(inboxAbs, list.name, ext, entry);
+            const didCreate = await this.createInboundTask(
+              inboxAbs,
+              list.name,
+              ext,
+              entry,
+              blockIndex,
+            );
             if (didCreate) created++;
           }
         }
@@ -684,6 +702,7 @@ export class SyncEngine {
     listName: string,
     ext: ExternalTask,
     entry: BackendEntry,
+    blockIndex: Map<string, BlockAnchor>,
   ): Promise<boolean> {
     const backend = entry.adapter.backend;
     const tag = listNameToTag(listName, entry.tagListMap);
@@ -703,11 +722,15 @@ export class SyncEngine {
       ...(this.options.suppressNext ? { onWillWrite: this.options.suppressNext } : {}),
     };
 
-    // Prefer inserting into an existing block for this tag.
-    const target = await this.findBlockInsertion(tag);
+    // Prefer inserting into an existing block for this tag (from the per-pass
+    // index). On success, advance the index anchor to the just-inserted line so
+    // the next inbound task for this tag lands beneath it (preserving order).
+    const target = blockIndex.get(tag);
     if (target) {
       const res = await insertLineAfter(target.absPath, target.afterLine, target.expectedLine, line, opts);
       if (!res.changed) {
+        // Anchor is stale (file changed under us); drop it and retry next pass.
+        blockIndex.delete(tag);
         this.log.warn("Could not insert inbound task into existing block; retry next pass", {
           backend,
           tag,
@@ -715,10 +738,30 @@ export class SyncEngine {
         });
         return false;
       }
-    } else if (!existsSync(inboxAbs)) {
-      await appendLines(inboxAbs, ["# Sync Inbox", "", `#${tag}`, line], opts);
+      blockIndex.set(tag, {
+        absPath: target.absPath,
+        afterLine: target.afterLine + 1,
+        expectedLine: line,
+      });
     } else {
-      await appendLines(inboxAbs, ["", `#${tag}`, line], opts);
+      const exists = existsSync(inboxAbs);
+      await appendLines(
+        inboxAbs,
+        exists ? ["", `#${tag}`, line] : ["# Sync Inbox", "", `#${tag}`, line],
+        opts,
+      );
+      // Record the freshly-created inbox block so further same-tag tasks in this
+      // pass insert into it instead of creating duplicate `#tag` blocks.
+      try {
+        const content = await readFile(inboxAbs, "utf8");
+        const lines = content.split("\n");
+        const idx = lines.lastIndexOf(line);
+        if (idx >= 0) {
+          blockIndex.set(tag, { absPath: inboxAbs, afterLine: idx, expectedLine: line });
+        }
+      } catch {
+        // Non-fatal: the next pass will rebuild the index from disk.
+      }
     }
 
     await this.persistLink({
@@ -735,13 +778,13 @@ export class SyncEngine {
   }
 
   /**
-   * Find an existing checklist block governed by `tag` anywhere in the vault and
-   * return the insertion anchor (the last task line of that block, after which
-   * the new task is inserted so it stays inside the block).
+   * Build a `tag → insertion anchor` index for the whole vault in a single scan.
+   * The anchor is the **last** task line of the first file (in traversal order)
+   * that contains a block governed by that tag, so inbound tasks are appended to
+   * the end of the existing block. Replaces a per-task full-vault rescan.
    */
-  private async findBlockInsertion(
-    tag: string,
-  ): Promise<{ absPath: string; afterLine: number; expectedLine: string } | undefined> {
+  private async buildBlockIndex(): Promise<Map<string, BlockAnchor>> {
+    const index = new Map<string, BlockAnchor>();
     const files = await this.listMarkdownFiles(this.options.vaultPath);
     for (const abs of files) {
       let content: string;
@@ -751,17 +794,20 @@ export class SyncEngine {
         continue;
       }
       const blockTags = resolveBlockTags(parseTree(content), this.options.definedTags);
+      if (blockTags.size === 0) continue;
       const lines = content.split("\n");
-      let lastLine = -1;
-      for (const [index, blockTag] of blockTags) {
-        if (blockTag === tag && index > lastLine) lastLine = index;
+      const lastByTag = new Map<string, number>();
+      for (const [idx, tag] of blockTags) {
+        const prev = lastByTag.get(tag);
+        if (prev === undefined || idx > prev) lastByTag.set(tag, idx);
       }
-      if (lastLine >= 0) {
-        const expectedLine = lines[lastLine];
-        if (expectedLine !== undefined) return { absPath: abs, afterLine: lastLine, expectedLine };
+      for (const [tag, idx] of lastByTag) {
+        if (index.has(tag)) continue; // first file wins
+        const expectedLine = lines[idx];
+        if (expectedLine !== undefined) index.set(tag, { absPath: abs, afterLine: idx, expectedLine });
       }
     }
-    return undefined;
+    return index;
   }
 
   private async persistLink(link: ExternalLink): Promise<void> {
