@@ -41,12 +41,14 @@ function listFilter(listId: string): Pick<ListTasksOptions, "listId" | "inbox"> 
 export class SupernoteAdapter implements SyncAdapter {
   public readonly backend = "supernote";
   private readonly client: SupernoteServiceClient;
+  private readonly baseUrl: string;
 
   public constructor(
     cfg: SupernoteBackendConfig,
     private readonly log: Logger,
     client?: SupernoteServiceClient,
   ) {
+    this.baseUrl = cfg.service.baseUrl;
     this.client =
       client ??
       new SupernoteHttpClient(
@@ -58,10 +60,20 @@ export class SupernoteAdapter implements SyncAdapter {
   }
 
   public async init(): Promise<void> {
+    // The version probe hits the unauthenticated GET /v1/version and swallows
+    // transport errors. A missing version means the configured base URL is not
+    // reachable as a supernote-task-service (wrong host, scheme, or proxy path),
+    // which would make every sync call fail — surface it loudly with the URL.
     const version = await this.client.version();
-    if (version !== undefined) {
-      this.log.debug("connected to supernote-task-service", { version });
+    if (version === undefined) {
+      this.log.warn(
+        "could not reach supernote-task-service; check SUPERNOTE_SERVICE_URL " +
+          "points at the service root (it should answer GET /v1/version)",
+        { baseUrl: this.baseUrl },
+      );
+      return;
     }
+    this.log.debug("connected to supernote-task-service", { version });
   }
 
   public async listLists(): Promise<ExternalList[]> {

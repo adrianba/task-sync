@@ -5,6 +5,8 @@ import {
 import {
   SupernoteConflictError,
   SupernoteCursorExpiredError,
+  SupernoteHttpClient,
+  SupernoteNotFoundError,
   type ListTasksOptions,
   type ServiceTask,
   type ServiceTaskCreate,
@@ -145,6 +147,8 @@ class FakeClient implements SupernoteServiceClient {
   public cursorMinSince?: number;
   /** Records the `since` value of every listTasks call (undefined = active). */
   public sinceCalls: (number | undefined)[] = [];
+  /** Result of the version() probe; undefined simulates an unreachable service. */
+  public versionResult: string | undefined = "1.2.3";
 
   listLists(): Promise<ServiceTaskList[]> {
     return Promise.resolve(this.lists);
@@ -168,7 +172,14 @@ class FakeClient implements SupernoteServiceClient {
       this.cursorMinSince !== undefined &&
       options.since < this.cursorMinSince
     ) {
-      return Promise.reject(new SupernoteCursorExpiredError("cursor_expired", "{}"));
+      return Promise.reject(
+        new SupernoteCursorExpiredError({
+          method: "GET",
+          url: "https://x/v1/tasks",
+          code: "cursor_expired",
+          body: "{}",
+        }),
+      );
     }
     const deltaMode = options.since !== undefined;
     const since = options.since ?? 0;
@@ -208,7 +219,14 @@ class FakeClient implements SupernoteServiceClient {
       ...(expectedVersionMs !== undefined ? { expected: expectedVersionMs } : {}),
     };
     if (this.conflictOnUpdate) {
-      return Promise.reject(new SupernoteConflictError("conflict", "{}"));
+      return Promise.reject(
+        new SupernoteConflictError({
+          method: "PATCH",
+          url: "https://x/v1/tasks/t",
+          code: "conflict",
+          body: "{}",
+        }),
+      );
     }
     const task = this.tasks.find((t) => t.id === taskId);
     if (!task) return Promise.reject(new Error("not found"));
@@ -223,7 +241,7 @@ class FakeClient implements SupernoteServiceClient {
     return Promise.resolve();
   }
   version(): Promise<string | undefined> {
-    return Promise.resolve("1.2.3");
+    return Promise.resolve(this.versionResult);
   }
 }
 
@@ -324,5 +342,57 @@ describe("SupernoteAdapter", () => {
     expect(res.changed.map((t) => t.externalId)).toEqual(["1".repeat(32)]);
     // First the stale cursor (5) is rejected, then a full resync with no since.
     expect(client.sinceCalls).toEqual([5, undefined]);
+  });
+
+  it("warns (does not throw) when the service is unreachable on init", async () => {
+    const client = new FakeClient();
+    client.versionResult = undefined;
+    const warnings: { msg: string; baseUrl?: unknown }[] = [];
+    const probe = {
+      ...logger,
+      warn(msg: string, fields?: Record<string, unknown>) {
+        warnings.push({ msg, baseUrl: fields?.baseUrl });
+      },
+      child: () => probe,
+    } as unknown as typeof logger;
+    const adapter = new SupernoteAdapter(cfg, probe, client);
+    await adapter.init();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.msg).toContain("could not reach supernote-task-service");
+    expect(warnings[0]?.baseUrl).toBe("https://x");
+  });
+});
+
+describe("SupernoteHttpClient errors", () => {
+  function fakeFetch(status: number, body: string): typeof fetch {
+    return () =>
+      Promise.resolve(
+        new Response(body, { status, headers: { "Content-Type": "application/json" } }),
+      );
+  }
+
+  it("enriches a 404 with the request method and URL", async () => {
+    const client = new SupernoteHttpClient("https://svc.example/", "key", logger, {
+      fetch: fakeFetch(404, JSON.stringify({ detail: "Not Found", code: "not_found" })),
+    });
+    try {
+      await client.ensureList("Work");
+      throw new Error("expected ensureList to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(SupernoteNotFoundError);
+      const e = err as SupernoteNotFoundError;
+      expect(e.status).toBe(404);
+      expect(e.method).toBe("POST");
+      expect(e.url).toBe("https://svc.example/v1/lists");
+      expect(e.message).toContain("https://svc.example/v1/lists");
+      expect(e.message).toContain("HTTP 404");
+    }
+  });
+
+  it("returns null (not an error) for a 404 on a point getTask lookup", async () => {
+    const client = new SupernoteHttpClient("https://svc.example", "key", logger, {
+      fetch: fakeFetch(404, JSON.stringify({ detail: "Task not found.", code: "not_found" })),
+    });
+    expect(await client.getTask("a".repeat(32))).toBeNull();
   });
 });

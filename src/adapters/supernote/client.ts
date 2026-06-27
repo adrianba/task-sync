@@ -73,23 +73,44 @@ export interface ListTasksOptions {
   limit?: number;
 }
 
+/** Context describing the request that produced a service error. */
+export interface SupernoteErrorContext {
+  method: string;
+  url: string;
+  code: string | undefined;
+  body: string;
+}
+
 /** Generic, non-2xx error from the service. Carries the machine-readable code. */
 export class SupernoteServiceError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly code: string | undefined,
-    readonly body: string,
-  ) {
-    super(message);
+  readonly status: number;
+  readonly code: string | undefined;
+  readonly body: string;
+  readonly method: string;
+  readonly url: string;
+
+  constructor(summary: string, status: number, ctx: SupernoteErrorContext) {
+    const codePart = ctx.code ? ` code=${ctx.code}` : "";
+    const bodyPart = ctx.body ? ` body=${ctx.body}` : "";
+    super(`${summary} (${ctx.method} ${ctx.url} → HTTP ${status}${codePart})${bodyPart}`);
     this.name = "SupernoteServiceError";
+    this.status = status;
+    this.code = ctx.code;
+    this.body = ctx.body;
+    this.method = ctx.method;
+    this.url = ctx.url;
   }
 }
 
-/** Thrown on HTTP 404 so the adapter can treat a resource as missing. */
+/**
+ * Thrown on HTTP 404. The adapter treats this as "resource missing" only for a
+ * point lookup (`getTask`); for list/create calls a 404 means the endpoint
+ * itself was not found (e.g. a misconfigured `SUPERNOTE_SERVICE_URL` or a
+ * reverse-proxy path mismatch), so the enriched message carries the full URL.
+ */
 export class SupernoteNotFoundError extends SupernoteServiceError {
-  constructor(code: string | undefined, body: string) {
-    super("Supernote resource not found", 404, code, body);
+  constructor(ctx: SupernoteErrorContext) {
+    super("Supernote endpoint or resource not found", 404, ctx);
     this.name = "SupernoteNotFoundError";
   }
 }
@@ -100,8 +121,8 @@ export class SupernoteNotFoundError extends SupernoteServiceError {
  * catches this and defers to its conflict policy on the next reconcile.
  */
 export class SupernoteConflictError extends SupernoteServiceError {
-  constructor(code: string | undefined, body: string) {
-    super("Supernote task changed since last sync (conditional write rejected)", 409, code, body);
+  constructor(ctx: SupernoteErrorContext) {
+    super("Supernote task changed since last sync (conditional write rejected)", 409, ctx);
     this.name = "SupernoteConflictError";
   }
 }
@@ -113,8 +134,8 @@ export class SupernoteConflictError extends SupernoteServiceError {
  * full resync (mirrors Microsoft Graph's `410 Gone` delta handling).
  */
 export class SupernoteCursorExpiredError extends SupernoteServiceError {
-  constructor(code: string | undefined, body: string) {
-    super("Supernote delta cursor expired; full resync required", 410, code, body);
+  constructor(ctx: SupernoteErrorContext) {
+    super("Supernote delta cursor expired; full resync required", 410, ctx);
     this.name = "SupernoteCursorExpiredError";
   }
 }
@@ -304,7 +325,7 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
         if (response.status === 204) return undefined as T;
 
         const text = await response.text();
-        if (!response.ok) throw toServiceError(method, response.status, text);
+        if (!response.ok) throw toServiceError(method, url, response.status, text);
         return text ? (JSON.parse(text) as T) : (undefined as T);
       } catch (err) {
         if (err instanceof SupernoteServiceError) throw err;
@@ -325,20 +346,21 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
   }
 }
 
-function toServiceError(method: string, status: number, text: string): SupernoteServiceError {
+function toServiceError(
+  method: string,
+  url: string,
+  status: number,
+  text: string,
+): SupernoteServiceError {
   const snippet = text.slice(0, 1_000);
   const code = parseErrorCode(text);
-  if (status === 404) return new SupernoteNotFoundError(code, snippet);
-  if (status === 409) return new SupernoteConflictError(code, snippet);
+  const ctx: SupernoteErrorContext = { method, url, code, body: snippet };
+  if (status === 404) return new SupernoteNotFoundError(ctx);
+  if (status === 409) return new SupernoteConflictError(ctx);
   if (status === 410 && code === "cursor_expired") {
-    return new SupernoteCursorExpiredError(code, snippet);
+    return new SupernoteCursorExpiredError(ctx);
   }
-  return new SupernoteServiceError(
-    `Supernote service ${method} failed with HTTP ${status}: ${snippet}`,
-    status,
-    code,
-    snippet,
-  );
+  return new SupernoteServiceError("Supernote service request failed", status, ctx);
 }
 
 function parseErrorCode(text: string): string | undefined {
