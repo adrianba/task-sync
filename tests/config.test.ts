@@ -10,7 +10,7 @@ const base = {
 describe("config/loadConfig", () => {
   it("applies defaults and resolves paths to absolute", () => {
     const cfg = loadConfig({ skipEnv: true, overrides: base });
-    expect(cfg.listMapping).toBe("hybrid");
+    expect(cfg.tags).toEqual(["todo"]);
     expect(cfg.conflictPolicy).toBe("newer");
     expect(cfg.health.host).toBe("127.0.0.1");
     expect(cfg.health.port).toBe(8080);
@@ -64,32 +64,32 @@ describe("config/loadConfig", () => {
   it("layers overrides over defaults (overrides win)", () => {
     const cfg = loadConfig({
       skipEnv: true,
-      overrides: { ...base, listMapping: "tag", log: { level: "debug" } },
+      overrides: { ...base, tags: ["Work", "#Home"], log: { level: "debug" } },
     });
-    expect(cfg.listMapping).toBe("tag");
+    expect(cfg.tags).toEqual(["work", "home"]);
     expect(cfg.log.level).toBe("debug");
   });
 
   it("rejects an invalid enum value with a readable error", () => {
     expect(() =>
-      loadConfig({ skipEnv: true, overrides: { ...base, listMapping: "bogus" } }),
+      loadConfig({ skipEnv: true, overrides: { ...base, conflictPolicy: "bogus" } }),
     ).toThrow(/Invalid configuration/);
   });
 
-  it("defaults ignoreTags to an empty array", () => {
+  it("defaults tags to [todo]", () => {
     const cfg = loadConfig({ skipEnv: true, overrides: base });
-    expect(cfg.ignoreTags).toEqual([]);
+    expect(cfg.tags).toEqual(["todo"]);
   });
 
-  it("parses TASK_SYNC_IGNORE_TAGS (comma-separated, strips '#')", () => {
-    const prev = process.env.TASK_SYNC_IGNORE_TAGS;
-    process.env.TASK_SYNC_IGNORE_TAGS = "#next, someday ,, done";
+  it("parses TASK_SYNC_TODO_TAGS (comma-separated, strips '#', lowercases)", () => {
+    const prev = process.env.TASK_SYNC_TODO_TAGS;
+    process.env.TASK_SYNC_TODO_TAGS = "#Todo, Work ,, Home";
     try {
       const cfg = loadConfig({ overrides: base });
-      expect(cfg.ignoreTags).toEqual(["next", "someday", "done"]);
+      expect(cfg.tags).toEqual(["todo", "work", "home"]);
     } finally {
-      if (prev === undefined) delete process.env.TASK_SYNC_IGNORE_TAGS;
-      else process.env.TASK_SYNC_IGNORE_TAGS = prev;
+      if (prev === undefined) delete process.env.TASK_SYNC_TODO_TAGS;
+      else process.env.TASK_SYNC_TODO_TAGS = prev;
     }
   });
 

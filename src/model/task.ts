@@ -66,8 +66,18 @@ export interface Task {
   tags: string[];
   /** Parsed metadata fields. */
   fields: TaskFields;
-  /** Logical list this task belongs to (resolved by the mapping strategy). */
+  /**
+   * Logical list this task belongs to (resolved from {@link blockTag} by the
+   * mapping layer, optionally renamed per backend via `tagListMap`).
+   */
   listKey?: string;
+  /**
+   * The defined tag-path of the checklist block governing this task, e.g.
+   * `todo` or `todo/groceries`. Set by the vault layer from the tag on the
+   * non-task line above the block. Tasks not under a defined-tag block are out
+   * of scope and are not surfaced for syncing.
+   */
+  blockTag?: string;
   /** Source location for editing. */
   location: TaskLocation;
   /** The exact original line text, for diffing and idempotent writes. */

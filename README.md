@@ -46,7 +46,8 @@ VaultWatcher (chokidar, debounced, self-write suppression)
       ▼
 SyncEngine  (incremental, per-file; multi-target fan-out; 3-way reconcile)
    ├─ vault/document.ts    unified/remark → mdast → Task[]  (+ minimal-diff writer)
-   ├─ mapping/listMapping  Task → list (tag / file / hybrid)
+   ├─ vault/blocks.ts      defined-tag block resolver → which checklist is in scope
+   ├─ mapping/listMapping  Task → list (block tag → tag-path, per-backend rename)
    ├─ state/stateStore     baseline hashes + links keyed by (syncId, backend)
    └─ BackendRegistry      fan-out to N SyncAdapters
          ├─ msTodo     → Microsoft Graph (delta) ← MSAL → AES-GCM token cache
@@ -194,8 +195,7 @@ shape.
 |---|---|---|---|
 | `vaultPath` | `TASK_SYNC_VAULT_PATH` | `/vault` | Path to the Obsidian vault. |
 | `statePath` | `TASK_SYNC_STATE_PATH` | `/data/state.json` | Sync state file. |
-| `listMapping` | `TASK_SYNC_LIST_MAPPING` | `hybrid` | `tag` \| `file` \| `hybrid`. |
-| `ignoreTags` | `TASK_SYNC_IGNORE_TAGS` | `[]` | Tags ignored when choosing a list (comma-separated env). |
+| `tags` | `TASK_SYNC_TODO_TAGS` | `todo` | Defined tags that mark a checklist block as synced tasks (comma-separated env; leading `#` optional). |
 | `conflictPolicy` | `TASK_SYNC_CONFLICT_POLICY` | `newer` | Default policy (per-backend overridable). |
 | `inboundInboxFile` | `TASK_SYNC_INBOX_FILE` | `Sync Inbox.md` | Note that receives externally-created tasks. |
 | `watchDebounceMs` | — | `300` | Debounce window for file changes. |
@@ -286,54 +286,77 @@ The backend:
 
 ## List mapping & tags
 
-`listMapping` controls which external list a task is placed in:
+task-sync uses the **block-tag** model (the same convention as the
+[Obsidian Checklist plugin](https://github.com/delashum/obsidian-checklist-plugin)):
+a **defined tag** on the line *before* a checklist governs every item in that
+list. Items that are **not** under a defined-tag block are ignored — they are
+treated as ordinary checkboxes, not synced tasks.
 
-- **`tag`** — a task's `#tag` selects the list.
-- **`file`** — the containing note/folder selects the list.
-- **`hybrid`** (default) — prefer a known/mapped `#tag`, otherwise fall back to
-  the containing file.
+### How it works
 
-### How a tag becomes a list
+```markdown
+#todo
+- [ ] Buy milk          ← synced to list "todo"
+- [ ] Call the dentist  ← synced to list "todo"
 
-For the `tag` and `hybrid` strategies, resolution runs **per backend** in this
-order:
+## Groceries #todo/groceries
+- [ ] Eggs              ← synced to list "todo/groceries"
 
-1. Drop any tags listed in `ignoreTags` (and blank tags) from consideration.
-2. If a remaining tag has an entry in that backend's `tagListMap`, the **first
-   such mapped tag** wins and the list is its mapped name.
-3. Otherwise the **first remaining tag** is used verbatim as the list name.
-4. (`hybrid`/`file` only) With no usable tag, fall back to the containing
-   **folder** name — or, for a note at the vault root, the note's file name.
-5. If nothing resolves, the task goes to **`Inbox`**.
+Some prose, not a tag line.
+- [ ] This is ignored   ← no governing tag block → never synced
+```
 
-> Because step 3 falls back to the *first* tag on the line, set `ignoreTags` for
-> status/context tags (e.g. `#task`, `#someday`) so they don't accidentally
-> become list names.
+Rules:
 
-Resolution is **per backend**: each backend applies the global strategy and
-`ignoreTags`, but only its **own** `tagListMap`. The same task can therefore land
-in differently-named lists in Microsoft To Do and Supernote, and one backend's
-overrides never leak into another.
+1. A tag is **defined** via the `tags` config / `TASK_SYNC_TODO_TAGS` env
+   (default: `todo`). Only defined tags route tasks.
+2. The tag must sit on a **non-task line** (a heading or paragraph) and the
+   **immediately following list** is the governed block. One blank line between
+   the tag line and the list is allowed.
+3. Tags are **consolidated across files** — the same tag path means the same
+   list everywhere in the vault.
+4. **Sub-tags are their own list:** `#todo/groceries` ⇒ list `todo/groceries`.
+   A sub-tag counts only if its **main** tag (`todo`) is defined.
+5. If a governing line carries several tags, the **first defined tag wins**
+   (one list per task — no fan-out across lists).
+6. Tag matching is **case-insensitive**; the resolved list key is lowercased.
 
-Map specific tags to specific external lists per backend via `tagListMap` (config
-file), or the equivalent JSON env var (`MS_TAG_LIST_MAP` /
-`SUPERNOTE_TAG_LIST_MAP`):
+> **Moving a task out of a tagged block deletes it from the backend.** Because an
+> out-of-scope item is no longer a tracked task, the next full reconcile treats
+> its previously-synced backend task as removed (vault-wins deletion). Re-tagging
+> it later re-syncs it as a new task.
+
+### Renaming a tag to a custom list name (per backend)
+
+By default the list name **is** the tag path. Use a backend's `tagListMap` to
+rename a tag path to a specific external list. Resolution is **per backend**, so
+the same task can land in differently-named lists in Microsoft To Do and
+Supernote, and one backend's overrides never leak into another.
 
 ```jsonc
 "backends": {
   "msTodo": { "enabled": true, "clientId": "…",
-    "tagListMap": { "work": "Work", "home": "Personal" } }
+    "tagListMap": { "todo": "Work", "todo/groceries": "Shopping" } }
 }
 ```
 
 ```bash
-# Env-only deployments (Docker): per-backend maps + ignored tags
-SUPERNOTE_TAG_LIST_MAP='{"work":"Work","home":"Personal"}'
-TASK_SYNC_IGNORE_TAGS="task,someday,next"
+# Env-only deployments (Docker): defined tags + per-backend rename maps
+TASK_SYNC_TODO_TAGS="todo,work"
+SUPERNOTE_TAG_LIST_MAP='{"todo":"Work","todo/groceries":"Shopping"}'
 ```
 
-Externally-created tasks that have no vault counterpart are appended to the
-shared **Sync Inbox** note (`inboundInboxFile`).
+### Inbound (externally-created) tasks
+
+Externally-created tasks are pulled back into the vault **only if their list maps
+to a defined tag** — directly (the list name matches a defined tag path) or via
+the inverse of that backend's `tagListMap`. A matching task is inserted into an
+existing block for that tag anywhere in the vault, or, if none exists, a new
+`#<tag>` block is created in the shared **Sync Inbox** note (`inboundInboxFile`).
+
+> Tasks living in arbitrary device lists that don't map to a defined tag are
+> **not** imported — otherwise they would be written without a governing tag and
+> immediately deleted again on the next pass.
 
 ---
 

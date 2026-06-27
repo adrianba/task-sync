@@ -63,9 +63,15 @@ const configSchema = z.object({
   ignore: z
     .array(z.string())
     .default([".obsidian", ".trash", ".git", "node_modules"]),
-  listMapping: z.enum(["tag", "file", "hybrid"]).default("hybrid"),
-  /** Tags ignored when choosing a list (e.g. status/context tags). */
-  ignoreTags: z.array(z.string()).default([]),
+  /**
+   * Defined checklist tags (obsidian-checklist-plugin model). A tag on the
+   * non-task line above a checklist governs that block; only these tags (and
+   * their sub-tags) are synced. Stored without the leading '#', lowercased.
+   */
+  tags: z
+    .array(z.string())
+    .default(["todo"])
+    .transform((arr) => arr.map((t) => t.trim().replace(/^#/, "").toLowerCase()).filter((t) => t !== "")),
   watchDebounceMs: z.number().int().positive().default(300),
   /** Default conflict policy; each backend may override. */
   conflictPolicy: conflictPolicy.default("newer"),
@@ -151,9 +157,8 @@ function fromEnv(): Record<string, unknown> {
   if (env.TASK_SYNC_VAULT_PATH) out.vaultPath = env.TASK_SYNC_VAULT_PATH;
   if (env.TASK_SYNC_STATE_PATH) out.statePath = env.TASK_SYNC_STATE_PATH;
   if (env.TASK_SYNC_DRY_RUN) out.dryRun = env.TASK_SYNC_DRY_RUN === "true";
-  if (env.TASK_SYNC_LIST_MAPPING) out.listMapping = env.TASK_SYNC_LIST_MAPPING;
-  if (env.TASK_SYNC_IGNORE_TAGS)
-    out.ignoreTags = env.TASK_SYNC_IGNORE_TAGS.split(",")
+  if (env.TASK_SYNC_TODO_TAGS)
+    out.tags = env.TASK_SYNC_TODO_TAGS.split(",")
       .map((s) => s.trim().replace(/^#/, ""))
       .filter(Boolean);
   if (env.TASK_SYNC_CONFLICT_POLICY)

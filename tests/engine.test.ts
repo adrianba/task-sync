@@ -35,7 +35,8 @@ describe("SyncEngine", () => {
     const engine = new SyncEngine(backends, store, {
       vaultPath: vault,
       ignore: [".obsidian", ".git"],
-      mapping: { strategy: "hybrid" },
+      mapping: {},
+      definedTags: ["todo"],
       dryRun: false,
       inboundInboxFile: "Sync Inbox.md",
       logger: silentLogger,
@@ -45,7 +46,7 @@ describe("SyncEngine", () => {
   }
 
   it("assigns sync IDs and creates tasks outbound across multiple backends", async () => {
-    await writeFile(join(vault, "Work.md"), "- [ ] Write report #work\n");
+    await writeFile(join(vault, "Work.md"), "#todo\n- [ ] Write report\n");
     const a = new FakeAdapter("alpha");
     const b = new FakeAdapter("beta");
     const { engine } = await newEngine([entry(a), entry(b)]);
@@ -62,12 +63,12 @@ describe("SyncEngine", () => {
   });
 
   it("resolves the list per backend using each backend's tagListMap", async () => {
-    await writeFile(join(vault, "Notes.md"), "- [ ] Plan trip #work\n");
+    await writeFile(join(vault, "Notes.md"), "#todo\n- [ ] Plan trip\n");
     const a = new FakeAdapter("alpha");
     const b = new FakeAdapter("beta");
     const { engine } = await newEngine([
-      { adapter: a, conflictPolicy: "newer", tagListMap: { work: "Alpha Work" } },
-      { adapter: b, conflictPolicy: "newer", tagListMap: { work: "Beta Boulot" } },
+      { adapter: a, conflictPolicy: "newer", tagListMap: { todo: "Alpha Work" } },
+      { adapter: b, conflictPolicy: "newer", tagListMap: { todo: "Beta Boulot" } },
     ]);
 
     await engine.reconcile();
@@ -80,7 +81,7 @@ describe("SyncEngine", () => {
 
 
   it("is idempotent: a second reconcile makes no further external changes", async () => {
-    await writeFile(join(vault, "Work.md"), "- [ ] Task one #work\n");
+    await writeFile(join(vault, "Work.md"), "#todo\n- [ ] Task one\n");
     const a = new FakeAdapter("alpha");
     const { engine } = await newEngine([entry(a)]);
     await engine.reconcile();
@@ -92,7 +93,7 @@ describe("SyncEngine", () => {
 
   it("pushes vault edits outbound on the next pass", async () => {
     const file = join(vault, "Work.md");
-    await writeFile(file, "- [ ] Original #work\n");
+    await writeFile(file, "#todo\n- [ ] Original\n");
     const a = new FakeAdapter("alpha");
     const { engine } = await newEngine([entry(a)]);
     await engine.reconcile();
@@ -106,7 +107,7 @@ describe("SyncEngine", () => {
 
   it("applies external status changes inbound to the vault", async () => {
     const file = join(vault, "Work.md");
-    await writeFile(file, "- [ ] Finish me #work\n");
+    await writeFile(file, "#todo\n- [ ] Finish me\n");
     const a = new FakeAdapter("alpha");
     const { engine } = await newEngine([entry(a)]);
     await engine.reconcile();
@@ -121,19 +122,28 @@ describe("SyncEngine", () => {
 
   it("creates inbound externally-created tasks into the Sync Inbox", async () => {
     const a = new FakeAdapter("alpha");
-    a.seedTask("Personal", { title: "Bought externally", status: "todo" });
-    const { engine } = await newEngine([entry(a)]);
+    a.seedTask("personal", { title: "Bought externally", status: "todo" });
+    const { engine } = await newEngine([entry(a)], { definedTags: ["personal"] });
     const created = await engine.pullInbound();
     expect(created).toBe(1);
     const inbox = await readFile(join(vault, "Sync Inbox.md"), "utf8");
     expect(inbox).toMatch(/# Sync Inbox/);
+    expect(inbox).toMatch(/#personal/);
     expect(inbox).toMatch(/Bought externally/);
     expect(inbox).toMatch(/<!-- sync-id: /);
   });
 
+  it("skips inbound tasks from lists that are not a defined tag", async () => {
+    const a = new FakeAdapter("alpha");
+    a.seedTask("Random Device List", { title: "Off-scope", status: "todo" });
+    const { engine } = await newEngine([entry(a)]); // definedTags = ["todo"]
+    const created = await engine.pullInbound();
+    expect(created).toBe(0);
+  });
+
   it("resolves conflicts per-backend policy (vault-wins keeps the vault)", async () => {
     const file = join(vault, "Work.md");
-    await writeFile(file, "- [ ] Contended #work\n");
+    await writeFile(file, "#todo\n- [ ] Contended\n");
     const a = new FakeAdapter("alpha");
     const { engine } = await newEngine([entry(a, "vault-wins")]);
     await engine.reconcile();
@@ -150,9 +160,28 @@ describe("SyncEngine", () => {
     expect(a.allTasks()[0]!.status).toBe("in-progress");
   });
 
+  it("deletes the backend task when a synced item is moved out of a tagged block", async () => {
+    const file = join(vault, "Work.md");
+    await writeFile(file, "#todo\n- [ ] Will be untagged\n");
+    const a = new FakeAdapter("alpha");
+    const { engine, store } = await newEngine([entry(a)]);
+    await engine.reconcile();
+    expect(a.allTasks()).toHaveLength(1);
+    expect(store.allLinks()).toHaveLength(1);
+
+    // Drop the governing tag → the item is no longer in scope.
+    const withId = await readFile(file, "utf8");
+    await writeFile(file, withId.replace(/^#todo\n/, ""));
+
+    const r = await engine.reconcile();
+    expect(r.deletedExternal).toBe(1);
+    expect(a.allTasks()).toHaveLength(0);
+    expect(store.allLinks()).toHaveLength(0);
+  });
+
   it("dry-run never writes to the vault or backends", async () => {
     const file = join(vault, "Work.md");
-    await writeFile(file, "- [ ] No writes #work\n");
+    await writeFile(file, "#todo\n- [ ] No writes\n");
     const a = new FakeAdapter("alpha");
     const { engine } = await newEngine([entry(a)], { dryRun: true });
     const r = await engine.reconcile();
@@ -166,7 +195,7 @@ describe("SyncEngine", () => {
     await mkdir(join(vault, "sub"), { recursive: true });
     await writeFile(
       join(vault, "Note.md"),
-      "- [ ] Real task #work\n\n```\n- [ ] Fake task in code\n```\n",
+      "#todo\n- [ ] Real task\n\n```\n- [ ] Fake task in code\n```\n",
     );
     const a = new FakeAdapter("alpha");
     const { engine } = await newEngine([entry(a)]);

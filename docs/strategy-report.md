@@ -24,7 +24,7 @@ not prototype APIs.
 
 | Question | Recommendation |
 |---|---|
-| List mapping | **Hybrid** remains the default: prefer an explicit/known `#tag`, fall back to file/folder placement. |
+| List mapping | **Block-tag** (obsidian-checklist-plugin model): a defined tag (default `#todo`) on the line above a checklist governs that block; only items under a defined-tag block sync. |
 | Correlation-ID persistence | **HTML comment** `<!-- sync-id: … -->` on the task line. Do not reuse the Tasks plugin `🆔` field. |
 | Multi-target fan-out | One vault `syncId` may link to multiple external tasks; persisted state is keyed by **`(syncId, backend)`**. |
 | Conflict resolution | **Whole-task 3-way detection** using the stored baseline; policies are `vault-wins`, `external-wins`, or `newer`, with per-backend overrides. |
@@ -48,26 +48,37 @@ Obsidian tasks may be grouped by tag, file, folder, heading, or convention.
 
 **Options considered**
 
-1. **Tag-based** — a task's `#tag` selects the external list.
-   - ✅ Explicit and matches many Obsidian workflows.
-   - ❌ Ambiguous with multiple tags; undefined when no tag exists.
+1. **Tag-on-line** — a task's own `#tag` selects the external list.
+   - ✅ Explicit; matches many Obsidian workflows.
+   - ❌ Ambiguous with multiple tags; clutters the task text; undefined when no
+     tag exists.
 2. **File/folder-based** — the note or folder selects the external list.
    - ✅ Always available for file-organized vaults.
    - ❌ Ignores cross-cutting tags; a single note can contain several domains.
-3. **Hybrid (chosen)** — prefer configured/usable tags, then fall back to file or
-   folder placement.
-   - ✅ Works with both tag-oriented and file-oriented vaults.
-   - ✅ Ensures every task has an external destination.
+3. **Block-tag (chosen)** — the
+   [obsidian-checklist-plugin](https://github.com/delashum/obsidian-checklist-plugin)
+   model: a **defined** tag on the non-task line *above* a checklist governs
+   that whole block; only items under a defined-tag block are treated as tasks.
+   - ✅ Keeps the task text clean (no routing tag on every line).
+   - ✅ Matches the plugin the user already uses to view checklists.
+   - ✅ Unsynced checkboxes coexist with synced tasks in the same note.
 
-Production keeps this strategy. Configuration exposes `listMapping: "tag" |
-"file" | "hybrid"` and per-backend `tagListMap` overrides in `src/config.ts`.
-Runtime list resolution is called from `src/sync/syncEngine.ts` via
-`resolveListKey()` in `src/mapping/listMapping.ts` before fan-out.
+Production uses the block-tag model. Defined tags come from `tags` /
+`TASK_SYNC_TODO_TAGS` (default `["todo"]`). `vault/blocks.ts` (pure) resolves
+each task line's governing tag from the mdast (a heading/paragraph whose text
+contains a defined tag governs the immediately following sibling `list`; the
+first defined tag wins). The list key is the **tag path** (`#todo/groceries` ⇒
+`todo/groceries`); a sub-tag counts only if its main tag is defined; matching is
+case-insensitive. Per-backend `tagListMap` only *renames* a tag path to a custom
+list. Runtime resolution is `resolveListForBackend()` in
+`src/sync/syncEngine.ts` using `resolveListKey()`/`mapTag()` in
+`src/mapping/listMapping.ts` before fan-out.
 
-**Decision:** default to **hybrid**. Keep list mapping deterministic and
-single-list per backend. Multi-list fan-out within a single backend remains a
-future option; current fan-out means one vault task can sync to several
-**backends**, not several lists within one backend.
+**Decision:** block-tag mapping. Deterministic and single-list per backend; a
+task moved out of every defined-tag block is treated as a deletion (vault-wins).
+Multi-list fan-out within a single backend remains a future option; current
+fan-out means one vault task can sync to several **backends**, not several lists
+within one backend.
 
 ---
 
@@ -235,7 +246,7 @@ VaultWatcher (debounced, self-write suppression)
       ▼
 SyncEngine (incremental, per-file, 3-way reconcile, multi-target fan-out)
    ├─ vault/         remark parsing + taskMeta field grammar
-   ├─ mapping/       tag/file/hybrid list mapping + sync-id generation
+   ├─ mapping/       block-tag → tag-path list mapping + sync-id generation
    ├─ state/         baseline hashes, ExternalLink per (syncId, backend), delta tokens
    ├─ writer/        minimal-diff optimistic atomic writes
    └─ sync/backendRegistry → SyncAdapter[]

@@ -36,9 +36,11 @@ services:
       TASK_SYNC_STATE_PATH: /data/state.json
       TASK_SYNC_LOG_LEVEL: ${TASK_SYNC_LOG_LEVEL:-info}
 
-      # Tags ignored when choosing a list (comma-separated, e.g. status/context
-      # tags). Without this, a task is routed to a list named after its first tag.
-      TASK_SYNC_IGNORE_TAGS: ${TASK_SYNC_IGNORE_TAGS:-}
+      # Defined tags (comma-separated, leading '#' optional) that mark a
+      # checklist block as synced tasks. A defined tag on the line above a
+      # checklist routes those items to a list named after the tag path
+      # (e.g. #todo/groceries → list "todo/groceries"). Default: todo.
+      TASK_SYNC_TODO_TAGS: ${TASK_SYNC_TODO_TAGS:-todo}
 
       # Required when Microsoft To Do is enabled. Provide a 32-byte base64 or hex AES key.
       TASK_SYNC_TOKEN_KEY: ${TASK_SYNC_TOKEN_KEY:-}
@@ -56,7 +58,8 @@ services:
       SUPERNOTE_SERVICE_URL: ${SUPERNOTE_SERVICE_URL:-https://tasks.example.com}
       SUPERNOTE_API_KEY: ${SUPERNOTE_API_KEY:-}
       SUPERNOTE_REQUEST_TIMEOUT_MS: ${SUPERNOTE_REQUEST_TIMEOUT_MS:-15000}
-      # Optional per-backend tag → list-name map (JSON), e.g. {"work":"Work"}.
+      # Optional per-backend tag-path → list-name rename map (JSON),
+      # e.g. {"todo":"Work","todo/groceries":"Shopping"}.
       SUPERNOTE_TAG_LIST_MAP: ${SUPERNOTE_TAG_LIST_MAP:-}
 
     # The container runs as UID:GID 1000:1000 (the image's `node` user) by

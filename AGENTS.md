@@ -57,7 +57,8 @@ VaultWatcher (chokidar, debounced, self-write suppression, per-file change sets)
       ▼
 SyncEngine (incremental, per-file, 3-way reconcile, multi-target fan-out)
    ├─ vault/         remark pipeline: parse mdast → Task[]; serialize mutations
-   ├─ mapping/       Task → listKey (tag/file/hybrid) + sync-id generation
+   │                  blocks.ts resolves which defined-tag block governs each item
+   ├─ mapping/       Task → listKey (block tag → tag-path) + sync-id generation
    ├─ state/         baseline hashes + ExternalLink per (syncId, backend) + delta tokens
    ├─ writer/        minimal-diff, atomic, optimistic-concurrency writer
    ├─ sync/conflict  policy resolution (vault-wins/external-wins/newer)
@@ -82,12 +83,21 @@ engine to a specific provider.
   remark-stringify + unist-util-visit) for document structure (list items,
   checkboxes, code fences) and a pure `taskMeta` module for emoji/Dataview
   field parsing — avoiding fragile hand-rolled markdown parsing.
-- **Hybrid list mapping** (tag first, folder fallback). List resolution is
-  **per backend**: the global strategy + `ignoreTags` apply, but each backend
-  uses only its own `tagListMap` (`SyncEngine.resolveListForBackend`), so one
-  backend's tag→list overrides never leak into another. Configure ignored tags
-  via `TASK_SYNC_IGNORE_TAGS` and per-backend maps via `MS_TAG_LIST_MAP` /
-  `SUPERNOTE_TAG_LIST_MAP` (or the `tagListMap` config key).
+- **Block-tag list mapping (obsidian-checklist-plugin model).** A **defined** tag
+  (default `#todo`, configured via `tags` / `TASK_SYNC_TODO_TAGS`) on the
+  non-task line *above* a checklist governs that block; only items under such a
+  block are synced (others are ignored). `vault/blocks.ts` (pure) resolves
+  line→tag from the mdast (a heading/paragraph whose text contains a defined tag
+  governs the immediately following sibling `list`; first defined tag wins).
+  The list key is the **tag path** (`#todo/groceries` ⇒ `todo/groceries`);
+  sub-tags count only if their main tag is defined; matching is case-insensitive.
+  Resolution is **per backend**: a backend's `tagListMap` only *renames* a tag
+  path to a custom list (`MS_TAG_LIST_MAP` / `SUPERNOTE_TAG_LIST_MAP` or the
+  `tagListMap` config key); overrides never leak between backends
+  (`SyncEngine.resolveListForBackend`). Moving a synced task out of a tagged
+  block deletes its backend task (vault-wins). Inbound tasks are imported only if
+  their list maps to a defined tag, into an existing block or a new tagged block
+  in the Sync Inbox.
 - **3-way reconciliation** with content hashing on sync-relevant fields only.
   Conflict policy is configurable per backend; default `newer`, **Supernote
   defaults to `vault-wins`** (its device sync is undocumented/last-write-wins).

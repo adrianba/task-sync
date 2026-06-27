@@ -24,17 +24,20 @@ import type {
 } from "../adapters/types.js";
 import { ExternalConflictError } from "../adapters/types.js";
 import type { Logger } from "../logger.js";
-import { parseTasks } from "../vault/document.js";
+import { parseTasks, parseTree } from "../vault/document.js";
+import { resolveBlockTags } from "../vault/blocks.js";
 import { statusToChar } from "../vault/taskMeta.js";
 import {
   resolveListKey,
   generateSyncId,
+  listNameToTag,
   type MappingOptions,
 } from "../mapping/listMapping.js";
 import { StateStore, hashTask } from "../state/stateStore.js";
 import {
   applyMutations,
   appendLines,
+  insertLineAfter,
   reorderTaskLines,
   type ApplyResult,
   type ReorderItem,
@@ -48,6 +51,8 @@ export interface SyncEngineOptions {
   vaultPath: string;
   ignore: string[];
   mapping: MappingOptions;
+  /** Defined checklist tags whose blocks are synced (without leading '#'). */
+  definedTags: string[];
   /** When true, never write to markdown or any external system. */
   dryRun: boolean;
   /** Vault-relative note that receives externally-created tasks. */
@@ -169,24 +174,22 @@ export class SyncEngine {
   }
 
   private parseTasksFromContent(content: string, rel: string): Task[] {
-    const tasks = parseTasks(content, rel);
+    const tasks = parseTasks(content, rel, this.options.definedTags);
     for (const t of tasks) {
-      t.listKey = resolveListKey(t, this.options.mapping);
+      const listKey = resolveListKey(t, this.options.mapping);
+      if (listKey !== undefined) t.listKey = listKey;
     }
     return tasks;
   }
 
   /**
-   * Resolve the external list name for a task **per backend**, applying the
-   * global strategy/ignoreTags but that backend's own `tagListMap`. This keeps
-   * one backend's tag→list overrides from leaking into another and lets the
-   * same task land in differently-named lists per backend.
+   * Resolve the external list name for a task **per backend** from its block
+   * tag, applying that backend's own `tagListMap`. This keeps one backend's
+   * tag→list overrides from leaking into another and lets the same task land in
+   * differently-named lists per backend. Returns `undefined` if out of scope.
    */
-  private resolveListForBackend(task: Task, entry: BackendEntry): string {
-    return resolveListKey(task, {
-      ...this.options.mapping,
-      tagListMap: entry.tagListMap,
-    });
+  private resolveListForBackend(task: Task, entry: BackendEntry): string | undefined {
+    return resolveListKey(task, { tagListMap: entry.tagListMap });
   }
 
   // --- public entry points ------------------------------------------------
@@ -384,6 +387,7 @@ export class SyncEngine {
     if (!syncId) return task;
 
     const listName = this.resolveListForBackend(task, entry);
+    if (listName === undefined) return task; // out of scope; should not occur post-filter
     const curHash = hashTask(task);
     const link = this.store.getLink(syncId, backend);
 
@@ -564,8 +568,8 @@ export class SyncEngine {
           await this.removeLinksForDeletedExternalTasks(backend, fetched.removedIds);
           for (const ext of fetched.changed) {
             if (this.hasLinkForExternal(backend, ext.externalId)) continue;
-            await this.createInboundTask(inboxAbs, list.name, ext, backend);
-            created++;
+            const didCreate = await this.createInboundTask(inboxAbs, list.name, ext, entry);
+            if (didCreate) created++;
           }
         }
       } catch (err) {
@@ -630,28 +634,59 @@ export class SyncEngine {
       .some((l) => l.backend === backend && l.externalId === externalId);
   }
 
+  /**
+   * Place an externally-created task into the vault under a tagged checklist
+   * block so it belongs to the correct list. The target tag is derived from the
+   * external list name (inverse of `tagListMap`, else the list name as a
+   * tag-path). The task is inserted into an existing block for that tag if one
+   * exists anywhere in the vault; otherwise a new `#tag` block is appended to
+   * the Sync Inbox note.
+   *
+   * Lists that don't correspond to a **defined** tag are skipped: writing them
+   * would create an out-of-scope line that the next pass would delete.
+   *
+   * @returns true if a task line was written, false if skipped.
+   */
   private async createInboundTask(
     inboxAbs: string,
     listName: string,
     ext: ExternalTask,
-    backend: string,
-  ): Promise<void> {
+    entry: BackendEntry,
+  ): Promise<boolean> {
+    const backend = entry.adapter.backend;
+    const tag = listNameToTag(listName, entry.tagListMap);
+    const main = tag.split("/", 1)[0] ?? tag;
+    if (!this.options.definedTags.includes(main)) {
+      this.log.debug("Skipping inbound task from non-defined list", { backend, listName, tag });
+      return false;
+    }
+
     const syncId = generateSyncId();
     const statusChar = statusToChar(ext.status);
     const due = ext.due ? ` 📅 ${ext.due}` : "";
     const done = ext.done ? ` ✅ ${ext.done}` : "";
-    const tag = listName && listName !== "Inbox" ? ` #${slugTag(listName)}` : "";
-    const line = `- [${statusChar}] ${ext.title}${tag}${due}${done} <!-- sync-id: ${syncId} -->`;
+    const line = `- [${statusChar}] ${ext.title}${due}${done} <!-- sync-id: ${syncId} -->`;
 
     const opts = {
-      ...(this.options.suppressNext
-        ? { onWillWrite: this.options.suppressNext }
-        : {}),
+      ...(this.options.suppressNext ? { onWillWrite: this.options.suppressNext } : {}),
     };
-    if (!existsSync(inboxAbs)) {
-      await appendLines(inboxAbs, ["# Sync Inbox", "", line], opts);
+
+    // Prefer inserting into an existing block for this tag.
+    const target = await this.findBlockInsertion(tag);
+    if (target) {
+      const res = await insertLineAfter(target.absPath, target.afterLine, target.expectedLine, line, opts);
+      if (!res.changed) {
+        this.log.warn("Could not insert inbound task into existing block; retry next pass", {
+          backend,
+          tag,
+          file: relative(this.options.vaultPath, target.absPath).split(sep).join("/"),
+        });
+        return false;
+      }
+    } else if (!existsSync(inboxAbs)) {
+      await appendLines(inboxAbs, ["# Sync Inbox", "", `#${tag}`, line], opts);
     } else {
-      await appendLines(inboxAbs, [line], opts);
+      await appendLines(inboxAbs, ["", `#${tag}`, line], opts);
     }
 
     await this.persistLink({
@@ -664,6 +699,37 @@ export class SyncEngine {
         : {}),
       lastSyncedAt: new Date().toISOString(),
     });
+    return true;
+  }
+
+  /**
+   * Find an existing checklist block governed by `tag` anywhere in the vault and
+   * return the insertion anchor (the last task line of that block, after which
+   * the new task is inserted so it stays inside the block).
+   */
+  private async findBlockInsertion(
+    tag: string,
+  ): Promise<{ absPath: string; afterLine: number; expectedLine: string } | undefined> {
+    const files = await this.listMarkdownFiles(this.options.vaultPath);
+    for (const abs of files) {
+      let content: string;
+      try {
+        content = await readFile(abs, "utf8");
+      } catch {
+        continue;
+      }
+      const blockTags = resolveBlockTags(parseTree(content), this.options.definedTags);
+      const lines = content.split("\n");
+      let lastLine = -1;
+      for (const [index, blockTag] of blockTags) {
+        if (blockTag === tag && index > lastLine) lastLine = index;
+      }
+      if (lastLine >= 0) {
+        const expectedLine = lines[lastLine];
+        if (expectedLine !== undefined) return { absPath: abs, afterLine: lastLine, expectedLine };
+      }
+    }
+    return undefined;
   }
 
   private async persistLink(link: ExternalLink): Promise<void> {
@@ -948,7 +1014,3 @@ function mergeInbound(task: Task, ext: ExternalTask): Task {
   };
 }
 
-/** Turn a list display name into a safe single tag token. */
-function slugTag(name: string): string {
-  return name.replace(/\s+/g, "-").replace(/[^\p{L}\p{N}_-]/gu, "");
-}

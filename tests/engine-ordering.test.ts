@@ -69,7 +69,8 @@ describe("SyncEngine ordering", () => {
     const engine = new SyncEngine(backends, store, {
       vaultPath: vault,
       ignore: [".obsidian", ".git"],
-      mapping: { strategy: "hybrid" },
+      mapping: {},
+      definedTags: ["todo"],
       dryRun: false,
       inboundInboxFile: "Sync Inbox.md",
       logger: silentLogger,
@@ -79,7 +80,7 @@ describe("SyncEngine ordering", () => {
   }
 
   it("creates tasks in document order and keeps the backend order matching", async () => {
-    await writeFile(join(vault, "Groceries.md"), "- [ ] A\n- [ ] B\n- [ ] C\n");
+    await writeFile(join(vault, "Groceries.md"), "#todo\n- [ ] A\n- [ ] B\n- [ ] C\n");
     const a = new FakeAdapter("supernote", true);
     const { engine } = await newEngine([entry(a)]);
 
@@ -89,7 +90,7 @@ describe("SyncEngine ordering", () => {
 
   it("pushes a vault reorder outbound to the backend", async () => {
     const file = join(vault, "Groceries.md");
-    await writeFile(file, "- [ ] A\n- [ ] B\n- [ ] C\n");
+    await writeFile(file, "#todo\n- [ ] A\n- [ ] B\n- [ ] C\n");
     const a = new FakeAdapter("supernote", true);
     const { engine } = await newEngine([entry(a)]);
     await engine.reconcile();
@@ -103,7 +104,7 @@ describe("SyncEngine ordering", () => {
 
   it("reflects a device reorder back into the markdown (inbound)", async () => {
     const file = join(vault, "Groceries.md");
-    await writeFile(file, "- [ ] A\n- [ ] B\n- [ ] C\n");
+    await writeFile(file, "#todo\n- [ ] A\n- [ ] B\n- [ ] C\n");
     const a = new FakeAdapter("supernote", true);
     const { engine } = await newEngine([entry(a)]);
     await engine.reconcile();
@@ -121,7 +122,7 @@ describe("SyncEngine ordering", () => {
 
   it("on an ordering conflict, vault order wins (vault-wins policy)", async () => {
     const file = join(vault, "Groceries.md");
-    await writeFile(file, "- [ ] A\n- [ ] B\n- [ ] C\n");
+    await writeFile(file, "#todo\n- [ ] A\n- [ ] B\n- [ ] C\n");
     const a = new FakeAdapter("supernote", true);
     const { engine } = await newEngine([entry(a, "vault-wins")]);
     await engine.reconcile();
@@ -141,7 +142,7 @@ describe("SyncEngine ordering", () => {
 
   it("is idempotent: a second pass issues no further reorders", async () => {
     const file = join(vault, "Groceries.md");
-    await writeFile(file, "- [ ] A\n- [ ] B\n- [ ] C\n");
+    await writeFile(file, "#todo\n- [ ] A\n- [ ] B\n- [ ] C\n");
     const a = new FakeAdapter("supernote", true);
     const { engine } = await newEngine([entry(a)]);
     await engine.reconcile();

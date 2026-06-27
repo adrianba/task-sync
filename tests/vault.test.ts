@@ -3,9 +3,11 @@ import { parseTasks } from "../src/vault/document.js";
 import { parseBody, statusToChar, statusCharToStatus } from "../src/vault/taskMeta.js";
 
 describe("vault/document parseTasks", () => {
+  const TAGS = ["todo"];
+
   it("parses emoji-notation tasks with status, tags, due and priority", () => {
-    const md = "- [ ] Audit pages #work #website ⏫ 📅 2026-07-10\n";
-    const tasks = parseTasks(md, "Note.md");
+    const md = "#todo\n- [ ] Audit pages #work #website ⏫ 📅 2026-07-10\n";
+    const tasks = parseTasks(md, "Note.md", TAGS);
     expect(tasks).toHaveLength(1);
     const t = tasks[0]!;
     expect(t.status).toBe("todo");
@@ -13,12 +15,13 @@ describe("vault/document parseTasks", () => {
     expect(t.tags).toEqual(["work", "website"]);
     expect(t.fields.due).toBe("2026-07-10");
     expect(t.fields.priority).toBe("high");
-    expect(t.location.line).toBe(0);
+    expect(t.blockTag).toBe("todo");
+    expect(t.location.line).toBe(1);
   });
 
   it("parses Dataview-notation fields", () => {
-    const md = "- [ ] Order filters #home [due:: 2026-06-30] [priority:: high]\n";
-    const t = parseTasks(md, "Home.md")[0]!;
+    const md = "#todo\n- [ ] Order filters #home [due:: 2026-06-30] [priority:: high]\n";
+    const t = parseTasks(md, "Home.md", TAGS)[0]!;
     expect(t.fields.due).toBe("2026-06-30");
     expect(t.fields.priority).toBe("high");
     expect(t.tags).toEqual(["home"]);
@@ -26,42 +29,50 @@ describe("vault/document parseTasks", () => {
 
   it("recognizes all status characters", () => {
     const md = [
+      "#todo",
       "- [ ] todo",
       "- [/] in progress",
       "- [x] done ✅ 2026-06-12",
       "- [X] also done",
       "- [-] cancelled",
     ].join("\n");
-    const statuses = parseTasks(md, "S.md").map((t) => t.status);
+    const statuses = parseTasks(md, "S.md", TAGS).map((t) => t.status);
     expect(statuses).toEqual(["todo", "in-progress", "done", "done", "cancelled"]);
   });
 
   it("reads an existing sync-id comment and strips it from the description", () => {
-    const md = "- [ ] Build lib #work <!-- sync-id: abc123 -->\n";
-    const t = parseTasks(md, "W.md")[0]!;
+    const md = "#todo\n- [ ] Build lib #work <!-- sync-id: abc123 -->\n";
+    const t = parseTasks(md, "W.md", TAGS)[0]!;
     expect(t.syncId).toBe("abc123");
     expect(t.description).toBe("Build lib");
   });
 
   it("ignores tasks inside fenced code blocks", () => {
-    const md = "- [ ] real\n\n```\n- [ ] fake\n```\n\n~~~\n- [ ] also fake\n~~~\n";
-    const tasks = parseTasks(md, "C.md");
+    const md = "#todo\n- [ ] real\n\n```\n- [ ] fake\n```\n\n~~~\n- [ ] also fake\n~~~\n";
+    const tasks = parseTasks(md, "C.md", TAGS);
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.description).toBe("real");
   });
 
   it("parses nested list items as separate tasks", () => {
-    const md = "- [ ] parent #p\n    - [ ] child #c\n";
-    const tasks = parseTasks(md, "N.md");
+    const md = "#todo\n- [ ] parent\n    - [ ] child\n";
+    const tasks = parseTasks(md, "N.md", TAGS);
     expect(tasks).toHaveLength(2);
     expect(tasks.map((t) => t.description)).toEqual(["parent", "child"]);
   });
 
   it("does not treat non-checkbox list items as tasks", () => {
-    const md = "- just a bullet\n- [ ] a task\n";
-    const tasks = parseTasks(md, "B.md");
+    const md = "#todo\n- just a bullet\n- [ ] a task\n";
+    const tasks = parseTasks(md, "B.md", TAGS);
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.description).toBe("a task");
+  });
+
+  it("ignores checklist items not under a defined-tag block", () => {
+    const md = "# Heading\n- [ ] not synced\n\n#todo\n- [ ] synced\n";
+    const tasks = parseTasks(md, "X.md", TAGS);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.description).toBe("synced");
   });
 });
 

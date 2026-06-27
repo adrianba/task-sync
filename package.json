@@ -32,6 +32,7 @@
     "@azure/msal-node": "^5.3.0",
     "chokidar": "^4.0.3",
     "mdast-util-to-markdown": "^2.1.2",
+    "mdast-util-to-string": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
     "remark-stringify": "^11.0.0",

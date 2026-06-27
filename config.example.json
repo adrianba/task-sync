@@ -1,7 +1,7 @@
 {
   "vaultPath": "/vault",
   "statePath": "/data/state.json",
-  "listMapping": "hybrid",
+  "tags": ["todo"],
   "ignore": [".obsidian", ".trash", ".git", "node_modules"],
   "watchDebounceMs": 300,
   "conflictPolicy": "newer",

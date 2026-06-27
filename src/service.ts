@@ -50,8 +50,6 @@ export class Service {
 
   private mappingOptions(): MappingOptions {
     return {
-      strategy: this.config.listMapping,
-      ignoreTags: this.config.ignoreTags,
       tagListMap: {
         ...this.config.backends.msTodo?.tagListMap,
         ...this.config.backends.supernote?.tagListMap,
@@ -93,6 +91,7 @@ export class Service {
       vaultPath: this.config.vaultPath,
       ignore: this.config.ignore,
       mapping: this.mappingOptions(),
+      definedTags: this.config.tags,
       dryRun,
       inboundInboxFile: this.config.inboundInboxFile,
       ...(this.watcher

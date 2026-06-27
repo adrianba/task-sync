@@ -87,7 +87,8 @@ describe("SyncEngine deletion reconciliation", () => {
     const engine = new SyncEngine(backends, store, {
       vaultPath: vault,
       ignore: [".obsidian", ".git"],
-      mapping: { strategy: "hybrid" },
+      mapping: {},
+      definedTags: ["todo"],
       dryRun: false,
       inboundInboxFile: "Sync Inbox.md",
       logger: silentLogger,
@@ -98,7 +99,7 @@ describe("SyncEngine deletion reconciliation", () => {
 
   it("deletes external tasks and links when a vault task is removed in a full reconcile", async () => {
     const file = join(vault, "Work.md");
-    await writeFile(file, "- [ ] Remove me #work\n");
+    await writeFile(file, "#todo\n- [ ] Remove me\n");
     const adapter = new DeletionAwareAdapter("alpha");
     const { engine, store } = await newEngine([entry(adapter)]);
     await engine.reconcile();
@@ -117,7 +118,7 @@ describe("SyncEngine deletion reconciliation", () => {
 
   it("skips the deletion sweep if any vault file cannot be read", async () => {
     const file = join(vault, "Work.md");
-    await writeFile(file, "- [ ] Keep me #work\n");
+    await writeFile(file, "#todo\n- [ ] Keep me\n");
     const adapter = new DeletionAwareAdapter("alpha");
     const { engine, store } = await newEngine([entry(adapter)]);
     await engine.reconcile();
@@ -134,7 +135,7 @@ describe("SyncEngine deletion reconciliation", () => {
 
   it("removes stale links reported by delta removedIds", async () => {
     const file = join(vault, "Work.md");
-    await writeFile(file, "- [ ] Deleted externally #work\n");
+    await writeFile(file, "#todo\n- [ ] Deleted externally\n");
     const adapter = new DeletionAwareAdapter("alpha");
     const { engine, store } = await newEngine([entry(adapter)]);
     await engine.reconcile();
@@ -149,7 +150,7 @@ describe("SyncEngine deletion reconciliation", () => {
 
   it("does not advance synced markers when inbound write hits an optimistic conflict", async () => {
     const file = join(vault, "Work.md");
-    await writeFile(file, "- [ ] Conflict me #work\n");
+    await writeFile(file, "#todo\n- [ ] Conflict me\n");
     const adapter = new ConcurrentEditAdapter("alpha");
     const { engine, store } = await newEngine([entry(adapter)]);
     await engine.reconcile();

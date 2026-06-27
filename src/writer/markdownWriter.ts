@@ -242,6 +242,42 @@ export async function appendLines(
 
 const maxCasAttempts = 3;
 
+/**
+ * Insert a single new line immediately **after** the line at 0-based
+ * `afterLine`, whose current text must still equal `expectedLine` (optimistic
+ * concurrency). Used to drop an inbound task into an existing checklist block.
+ * Atomic; returns `{ changed:false }` if the anchor line no longer matches.
+ */
+export async function insertLineAfter(
+  absPath: string,
+  afterLine: number,
+  expectedLine: string,
+  text: string,
+  options: ApplyMutationsOptions = {},
+): Promise<ApplyResult> {
+  for (let attempt = 0; attempt < maxCasAttempts; attempt++) {
+    const original = await readFile(absPath, "utf8");
+    const lines = original.split("\n");
+    if (lines[afterLine] !== expectedLine) {
+      return { changed: false, conflicts: 1 };
+    }
+    lines.splice(afterLine + 1, 0, text);
+    const updated = lines.join("\n");
+    if (options.dryRun) return { changed: true, conflicts: 0 };
+
+    const beforeHook = await readFile(absPath, "utf8");
+    if (beforeHook !== original) continue;
+    options.onWillWrite?.(absPath);
+    const currentOnDisk = await readFile(absPath, "utf8");
+    if (currentOnDisk !== original) continue;
+    await atomicWriteFile(absPath, updated);
+    return { changed: true, conflicts: 0 };
+  }
+  return { changed: false, conflicts: 0, skippedDueToConcurrentEdit: true };
+}
+
+
+
 async function readFileIfExists(absPath: string): Promise<string> {
   try {
     return await readFile(absPath, "utf8");

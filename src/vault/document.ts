@@ -17,6 +17,7 @@ import { visit } from "unist-util-visit";
 import type { Root } from "mdast";
 import type { Task } from "../model/task.js";
 import { TASK_LINE, parseBody, statusCharToStatus } from "./taskMeta.js";
+import { resolveBlockTags } from "./blocks.js";
 
 const processor = unified().use(remarkParse).use(remarkGfm);
 
@@ -26,14 +27,25 @@ export function parseTree(content: string): Root {
 }
 
 /**
- * Parse all Obsidian Tasks-plugin tasks from a file's content.
+ * Parse the syncable Obsidian Tasks-plugin tasks from a file's content.
  *
- * @param content  full file text
- * @param filePath vault-relative path stored on each task's location
+ * Tasks are scoped using the **block-tag** model: only checklist items that sit
+ * under a *defined* tag block (see {@link resolveBlockTags}) are returned, each
+ * carrying its `blockTag`. Items not under a defined-tag block are not tasks and
+ * are omitted. Passing no/empty `definedTags` yields no tasks.
+ *
+ * @param content     full file text
+ * @param filePath    vault-relative path stored on each task's location
+ * @param definedTags the tag allow-list (with or without leading '#')
  */
-export function parseTasks(content: string, filePath: string): Task[] {
+export function parseTasks(
+  content: string,
+  filePath: string,
+  definedTags: Iterable<string> = [],
+): Task[] {
   const tree = parseTree(content);
   const lines = content.split("\n");
+  const blockTags = resolveBlockTags(tree, definedTags);
 
   // Collect the 0-based line index of every list item's first line. A list item
   // node's start line is where its marker (`- `, `* `, `1.`) begins, i.e. the
@@ -47,6 +59,9 @@ export function parseTasks(content: string, filePath: string): Task[] {
 
   const tasks: Task[] = [];
   for (const index of [...taskLineIndexes].sort((a, b) => a - b)) {
+    const blockTag = blockTags.get(index);
+    if (blockTag === undefined) continue; // out of scope: not under a defined-tag block
+
     const raw = lines[index];
     if (raw === undefined) continue;
 
@@ -64,6 +79,7 @@ export function parseTasks(content: string, filePath: string): Task[] {
       description: parsed.description,
       tags: parsed.tags,
       fields: parsed.fields,
+      blockTag,
       location: { filePath, line: index },
       rawLine: raw,
     });

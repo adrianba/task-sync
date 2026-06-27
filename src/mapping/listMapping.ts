@@ -1,62 +1,56 @@
 import { randomBytes } from "node:crypto";
-import { posix as path } from "node:path";
 import type { Task } from "../model/task.js";
 
 export interface MappingOptions {
-  strategy: "tag" | "file" | "hybrid";
-  /** tag (without '#') -> external list display name */
+  /** tag-path (e.g. `todo/groceries`) -> external list display name */
   tagListMap?: Record<string, string>;
-  /** tags to ignore when choosing a list, e.g. status tags */
-  ignoreTags?: string[];
 }
 
-const DEFAULT_LIST = "Inbox";
+/**
+ * Resolve the external list display name for an **in-scope** task from its
+ * `blockTag` (the defined tag-path of the checklist block it belongs to).
+ *
+ * The tag-path is used verbatim as the list name unless `tagListMap` renames it
+ * (lookup is case-insensitive). Returns `undefined` for a task with no
+ * `blockTag` — such tasks are out of scope and must not be synced.
+ */
+export function resolveListKey(task: Task, opts: MappingOptions = {}): string | undefined {
+  const blockTag = task.blockTag;
+  if (blockTag === undefined || blockTag.trim() === "") return undefined;
+  return mapTag(blockTag, opts.tagListMap);
+}
 
-/** Resolve the logical list display name for a task. Never returns empty. */
-export function resolveListKey(task: Task, opts: MappingOptions): string {
-  const strategy = opts.strategy ?? "hybrid";
-
-  if (strategy === "tag" || strategy === "hybrid") {
-    const tagKey = tagListKey(task, opts);
-    if (tagKey !== undefined) return tagKey;
+/** Apply a (case-insensitive) tag->list rename, else use the tag-path verbatim. */
+export function mapTag(tagPath: string, tagListMap?: Record<string, string>): string {
+  const lower = tagPath.toLowerCase();
+  if (tagListMap) {
+    for (const [key, value] of Object.entries(tagListMap)) {
+      if (key.toLowerCase() === lower) {
+        const trimmed = value.trim();
+        if (trimmed !== "") return trimmed;
+      }
+    }
   }
+  return tagPath;
+}
 
-  if (strategy === "file" || strategy === "hybrid" || strategy === "tag") {
-    return nonEmpty(fileListKey(task.location.filePath)) ?? DEFAULT_LIST;
+/**
+ * Inverse of {@link mapTag}: given an external list display name, recover the
+ * tag-path that would map to it (for placing inbound tasks under a tagged
+ * block). Falls back to the list name itself, normalized as a tag-path.
+ */
+export function listNameToTag(listName: string, tagListMap?: Record<string, string>): string {
+  if (tagListMap) {
+    for (const [key, value] of Object.entries(tagListMap)) {
+      if (value.trim().toLowerCase() === listName.trim().toLowerCase()) {
+        return key.toLowerCase();
+      }
+    }
   }
-
-  return DEFAULT_LIST;
+  return listName.trim().replace(/^#/, "").toLowerCase();
 }
 
 /** Generate a short, opaque, URL-safe correlation id (e.g. 12+ chars). */
 export function generateSyncId(): string {
   return randomBytes(12).toString("base64url");
-}
-
-function tagListKey(task: Task, opts: MappingOptions): string | undefined {
-  const ignoreTags = new Set(opts.ignoreTags ?? []);
-  const usableTags = task.tags.filter((tag) => !ignoreTags.has(tag) && tag.trim() !== "");
-  if (usableTags.length === 0) return undefined;
-
-  const mappedTag = usableTags.find((tag) => nonEmpty(opts.tagListMap?.[tag]) !== undefined);
-  const tag = mappedTag ?? usableTags[0];
-  if (tag === undefined) return undefined;
-
-  return nonEmpty(opts.tagListMap?.[tag]) ?? tag;
-}
-
-function fileListKey(filePath: string): string | undefined {
-  const normalized = filePath.replaceAll("\\", "/");
-  const dir = path.dirname(normalized);
-  if (dir !== "." && dir !== "") return nonEmpty(path.basename(dir));
-
-  const baseName = path.basename(normalized);
-  const extension = path.extname(baseName);
-  const withoutExtension = extension === "" ? baseName : baseName.slice(0, -extension.length);
-  return nonEmpty(withoutExtension);
-}
-
-function nonEmpty(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed === undefined || trimmed === "" ? undefined : trimmed;
 }
