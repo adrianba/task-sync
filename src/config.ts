@@ -74,8 +74,6 @@ const configSchema = z.object({
     .transform((arr) => arr.map((t) => t.trim().replace(/^#/, "").toLowerCase()).filter((t) => t !== ""))
     .refine((arr) => arr.length > 0, "tags must contain at least one non-empty tag"),
   watchDebounceMs: z.number().int().positive().default(300),
-  /** Default conflict policy; each backend may override. */
-  conflictPolicy: conflictPolicy.default("newer"),
   inboundInboxFile: z.string().default("Sync Inbox.md"),
   dryRun: z.boolean().default(false),
   /** AES-256-GCM key (base64/hex, 32 bytes) for the token cache. */
@@ -162,8 +160,6 @@ function fromEnv(): Record<string, unknown> {
     out.tags = env.TASK_SYNC_TODO_TAGS.split(",")
       .map((s) => s.trim().replace(/^#/, ""))
       .filter(Boolean);
-  if (env.TASK_SYNC_CONFLICT_POLICY)
-    out.conflictPolicy = env.TASK_SYNC_CONFLICT_POLICY;
   if (env.TASK_SYNC_INBOX_FILE) out.inboundInboxFile = env.TASK_SYNC_INBOX_FILE;
   if (env.TASK_SYNC_LOG_LEVEL)
     out.log = { level: env.TASK_SYNC_LOG_LEVEL as LogLevel };

@@ -11,7 +11,6 @@ describe("config/loadConfig", () => {
   it("applies defaults and resolves paths to absolute", () => {
     const cfg = loadConfig({ skipEnv: true, overrides: base });
     expect(cfg.tags).toEqual(["todo"]);
-    expect(cfg.conflictPolicy).toBe("newer");
     expect(cfg.health.host).toBe("127.0.0.1");
     expect(cfg.health.port).toBe(8080);
     expect(cfg.log.level).toBe("info");
@@ -72,7 +71,7 @@ describe("config/loadConfig", () => {
 
   it("rejects an invalid enum value with a readable error", () => {
     expect(() =>
-      loadConfig({ skipEnv: true, overrides: { ...base, conflictPolicy: "bogus" } }),
+      loadConfig({ skipEnv: true, overrides: { ...base, log: { level: "bogus" } } }),
     ).toThrow(/Invalid configuration/);
   });
 
@@ -85,6 +84,18 @@ describe("config/loadConfig", () => {
     expect(() =>
       loadConfig({ skipEnv: true, overrides: { ...base, tags: [] } }),
     ).toThrow(/tags must contain at least one non-empty tag/u);
+  });
+
+  it("parses TASK_SYNC_DRY_RUN=true into config.dryRun", () => {
+    const prev = process.env.TASK_SYNC_DRY_RUN;
+    process.env.TASK_SYNC_DRY_RUN = "true";
+    try {
+      const cfg = loadConfig({ overrides: base });
+      expect(cfg.dryRun).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.TASK_SYNC_DRY_RUN;
+      else process.env.TASK_SYNC_DRY_RUN = prev;
+    }
   });
 
   it("parses TASK_SYNC_TODO_TAGS (comma-separated, strips '#', lowercases)", () => {

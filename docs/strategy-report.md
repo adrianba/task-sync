@@ -143,9 +143,8 @@ Policies are defined in `src/config.ts` and implemented in
 | `external-wins` | Prefer inbound external state when available. |
 | `newer` | Compare vault file mtime to external `lastModified`; ties go to the vault. |
 
-The global `conflictPolicy` defaults to `newer`, but each backend has its own
-policy setting through `backends.<name>.conflictPolicy` in `src/config.ts`.
-Production defaults are intentionally asymmetric:
+Each backend has its own policy setting through `backends.<name>.conflictPolicy`
+in `src/config.ts`. Production defaults are intentionally asymmetric:
 
 - **Microsoft To Do:** `newer`, because Graph exposes reliable
   `lastModifiedDateTime` and delta semantics.

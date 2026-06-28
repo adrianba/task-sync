@@ -69,7 +69,6 @@ describe("SyncEngine ordering", () => {
     const engine = new SyncEngine(backends, store, {
       vaultPath: vault,
       ignore: [".obsidian", ".git"],
-      mapping: {},
       definedTags: ["todo"],
       dryRun: false,
       inboundInboxFile: "Sync Inbox.md",

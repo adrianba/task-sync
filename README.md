@@ -232,7 +232,6 @@ shape.
 | `vaultPath` | `TASK_SYNC_VAULT_PATH` | `/vault` | Path to the Obsidian vault. |
 | `statePath` | `TASK_SYNC_STATE_PATH` | `/data/state.json` | Sync state file. |
 | `tags` | `TASK_SYNC_TODO_TAGS` | `todo` | Defined tags that mark a checklist block as synced tasks (comma-separated env; leading `#` optional). |
-| `conflictPolicy` | `TASK_SYNC_CONFLICT_POLICY` | `newer` | Default policy (per-backend overridable). |
 | `inboundInboxFile` | `TASK_SYNC_INBOX_FILE` | `Sync Inbox.md` | Note that receives externally-created tasks. |
 | `watchDebounceMs` | — | `300` | Debounce window for file changes. |
 | `dryRun` | `TASK_SYNC_DRY_RUN` | `false` | Observe-only. |
@@ -406,7 +405,7 @@ existing block for that tag anywhere in the vault, or, if none exists, a new
 ## Conflict resolution
 
 When both sides changed since the last sync, a **whole-task** conflict policy
-decides the winner (per-backend overridable):
+decides the winner (configured per backend):
 
 | Policy | Behaviour |
 |---|---|

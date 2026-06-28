@@ -12,7 +12,6 @@ import { BackendRegistry } from "./sync/backendRegistry.js";
 import { SyncEngine } from "./sync/syncEngine.js";
 import { VaultWatcher, type VaultChange } from "./watcher/vaultWatcher.js";
 import { HealthServer } from "./health/httpServer.js";
-import type { MappingOptions } from "./mapping/listMapping.js";
 import { VERSION } from "./version.js";
 
 export interface ServiceOptions {
@@ -48,15 +47,6 @@ export class Service {
     this.store = new StateStore(config.statePath);
   }
 
-  private mappingOptions(): MappingOptions {
-    return {
-      tagListMap: {
-        ...this.config.backends.msTodo?.tagListMap,
-        ...this.config.backends.supernote?.tagListMap,
-      },
-    };
-  }
-
   /** Start the service. In `once` mode resolves after a single pass. */
   async start(): Promise<void> {
     const dryRun = this.options.dryRun ?? this.config.dryRun;
@@ -90,7 +80,6 @@ export class Service {
     this.engine = new SyncEngine(this.registry.entries(), this.store, {
       vaultPath: this.config.vaultPath,
       ignore: this.config.ignore,
-      mapping: this.mappingOptions(),
       definedTags: this.config.tags,
       dryRun,
       inboundInboxFile: this.config.inboundInboxFile,

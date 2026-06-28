@@ -31,7 +31,6 @@ import {
   resolveListKey,
   generateSyncId,
   listNameToTag,
-  type MappingOptions,
 } from "../mapping/listMapping.js";
 import { StateStore, hashTask } from "../state/stateStore.js";
 import {
@@ -50,7 +49,6 @@ import { DeltaTokenExpiredError } from "../adapters/msTodo/msTodoAdapter.js";
 export interface SyncEngineOptions {
   vaultPath: string;
   ignore: string[];
-  mapping: MappingOptions;
   /** Defined checklist tags whose blocks are synced (without leading '#'). */
   definedTags: string[];
   /** When true, never write to markdown or any external system. */
@@ -190,12 +188,7 @@ export class SyncEngine {
     content: string,
     rel: string,
   ): { tasks: Task[]; hasCheckboxItems: boolean } {
-    const { tasks, hasCheckboxItems } = parseDocument(content, rel, this.options.definedTags);
-    for (const t of tasks) {
-      const listKey = resolveListKey(t, this.options.mapping);
-      if (listKey !== undefined) t.listKey = listKey;
-    }
-    return { tasks, hasCheckboxItems };
+    return parseDocument(content, rel, this.options.definedTags);
   }
 
   /**
