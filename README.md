@@ -143,6 +143,39 @@ SUPERNOTE_SERVICE_URL=https://tasks.example.com
 SUPERNOTE_API_KEY=<service api key>
 ```
 
+### Using a `config.json` file in Docker
+
+The image does **not** bundle a `config.json` — by default the example compose
+configures everything through `TASK_SYNC_*` / `MS_*` / `SUPERNOTE_*` env vars.
+
+If you prefer a JSON file (or need a setting that has no env var, such as
+`health.host`), mount one into the container. The service resolves config files
+**relative to its working directory `/app`**, looking for `config.json` then
+`config.local.json`, so the simplest option is to bind-mount to
+`/app/config.json`:
+
+```yaml
+services:
+  task-sync:
+    volumes:
+      - ./vault:/vault
+      - task-sync-data:/data
+      - ./config.json:/app/config.json:ro   # picked up automatically
+```
+
+To keep it elsewhere, mount it to any path and point at it explicitly:
+
+```yaml
+    volumes:
+      - ./config.json:/data/config.json:ro
+    command: ["--config", "/data/config.json"]
+```
+
+Env vars still **override** values from the file (see the layering order under
+[Configuration](#configuration)), so you can keep non-secret settings in the
+file and inject secrets via the environment. Both commented bind-mounts are in
+[`docker-compose.example.yml`](./docker-compose.example.yml).
+
 ---
 
 ## Volumes
@@ -181,7 +214,10 @@ your notes). Choose one:
 Configuration is layered, later sources winning:
 
 1. Built-in defaults
-2. `config.json`, then `config.local.json` (or a file passed via `--config`)
+2. `config.json`, then `config.local.json` (or a file passed via `--config`),
+   resolved **relative to the working directory** — `/app` in the Docker image,
+   so a file mounted at `/app/config.json` is loaded automatically (see
+   [Using a `config.json` file in Docker](#using-a-configjson-file-in-docker))
 3. Environment variables
 4. CLI flags (`--dry-run`)
 
