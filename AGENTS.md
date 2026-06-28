@@ -94,8 +94,11 @@ engine to a specific provider.
   Resolution is **per backend**: a backend's `tagListMap` only *renames* a tag
   path to a custom list (`MS_TAG_LIST_MAP` / `SUPERNOTE_TAG_LIST_MAP` or the
   `tagListMap` config key); overrides never leak between backends
-  (`SyncEngine.resolveListForBackend`). Moving a synced task out of a tagged
-  block deletes its backend task (vault-wins). Two safety guards protect against
+  (`SyncEngine.resolveListForBackend`). Moving a synced task to a **different
+  defined-tag block** moves it between backend lists (for move-capable backends;
+  see the Supernote cross-list-move note) rather than deleting it. Moving a
+  synced task out of **all** defined-tag blocks (so it is no longer in scope)
+  deletes its backend task (vault-wins). Two safety guards protect against
   mass deletion from a tag misconfiguration: the deletion sweep is skipped if
   `tags` is empty, **and** if a full pass finds checklist items present but none
   under a defined tag while external links exist (likely a typo'd allow-list).
@@ -165,10 +168,37 @@ engine to a specific provider.
     (`model/task.ts`) is the per-link baseline; it JSON-round-trips with state.
   - Limitation: cross-file interleaving on the device is unrepresentable in one
     file — per-file relative order is honoured, global order is grouped by file path.
+- **Cross-list moves (list membership) round-trip and preserve the task id.** A
+  move on the service is a plain `UPDATE SET task_list_id = <new>` (the
+  `task_id` is preserved, the row is **not** soft-deleted), so
+  `SupernoteAdapter.getTask` is **list-agnostic**: it returns the live row
+  regardless of the caller's last-known list (the caller reads
+  `ExternalTask.listId`), returning `null` only for a genuine deletion. This is
+  what stops a moved task being mistaken for a deletion and recreated (the old
+  duplicate + ping-pong bug). List membership is reconciled in
+  `reconcileTaskToBackend` → `reconcileListMembership` (capability-gated on the
+  optional `SyncAdapter.moveTask`; Microsoft To Do leaves it unimplemented so a
+  vault tag move there is a no-op):
+  - **Outbound** (vault block tag changed) → PATCH `list_id` via
+    `adapter.moveTask` (mapping `moveToUpdate`), applied inline; the markdown
+    line stays put. This also resolves the **both-moved conflict vault-wins**.
+  - **Inbound** (device moved the task) → the markdown line is **relocated** to
+    the matching tag block. Relocations are **deferred** to a post-walk phase
+    (`applyPendingRelocations`, like ordering) to avoid mid-pass line-index
+    churn, then re-read the source by `syncId` and `removeLine` (atomic,
+    optimistic) + re-insert (existing block, else Sync Inbox via a guaranteed
+    `fallbackToInbox` append so the line is never lost). The baseline list on the
+    link is advanced **only on a successful relocation**, so a failed/ skipped
+    relocation cannot trigger a spurious vault-wins reversal next pass.
+  - Inbound relocation runs only on the **full** `reconcile()` pass (needs the
+    whole-vault block index); watcher-driven incremental passes apply outbound
+    moves but defer inbound ones. A device move to a list whose tag is **not**
+    defined leaves the line in place (out of scope). New counters
+    `movedOutbound`/`movedInbound` on `ReconcileResult` surface the activity.
 - **Optimistic concurrency:** updates send `If-Unmodified-Since: <ms>` from the
   freshly-read `lastModified`; a `409` surfaces as `ExternalConflictError`
-  (`src/adapters/types.ts`) which the engine catches and defers. Deletes are
-  unconditional (vault-wins deletion should win) and **idempotent**: a `404`
+  (`src/adapters/types.ts`) which the engine catches and defers (moves included).
+  Deletes are unconditional (vault-wins deletion should win) and **idempotent**: a `404`
   (task already gone, e.g. deleted on the device) is treated as success so the
   engine prunes the stale link instead of re-attempting the same DELETE every
   reconcile pass. The engine also prunes defensively on any not-found-typed

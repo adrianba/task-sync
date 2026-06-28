@@ -21,6 +21,7 @@ import {
   INBOX_ID,
   inputToCreate,
   listIdFromService,
+  moveToUpdate,
   patchToUpdate,
   taskFromService,
 } from "./mapping.js";
@@ -115,8 +116,14 @@ export class SupernoteAdapter implements SyncAdapter {
   }
 
   public async getTask(listId: string, externalId: string): Promise<ExternalTask | null> {
+    // `listId` is only a hint: a cross-list move on the device preserves the
+    // task id but changes its `list_id`. Return the live row regardless of which
+    // list it currently belongs to (the caller reads `ExternalTask.listId`); a
+    // null means the task is genuinely gone, not merely moved. This is what
+    // keeps a moved task from being mistaken for a deletion and recreated.
+    void listId;
     const task = await this.client.getTask(externalId);
-    if (task === null || listIdFromService(task.list_id) !== listId) return null;
+    if (task === null) return null;
     return taskFromService(task);
   }
 
@@ -135,6 +142,32 @@ export class SupernoteAdapter implements SyncAdapter {
       const task = await this.client.updateTask(
         externalId,
         patchToUpdate(patch),
+        expectedVersionMs(expectedVersion),
+      );
+      return taskFromService(task);
+    } catch (err) {
+      if (err instanceof SupernoteConflictError) {
+        throw new ExternalConflictError(
+          `Supernote task ${externalId} changed since last sync`,
+          { cause: err },
+        );
+      }
+      throw err;
+    }
+  }
+
+  public async moveTask(
+    externalId: string,
+    toListId: string,
+    expectedVersion?: string,
+  ): Promise<ExternalTask> {
+    // A move is a plain `list_id` re-point on the service: the task id is
+    // preserved and only `last_modified` bumps. Conditional on the last-seen
+    // version so a concurrent device edit surfaces as a deferrable conflict.
+    try {
+      const task = await this.client.updateTask(
+        externalId,
+        moveToUpdate(toListId),
         expectedVersionMs(expectedVersion),
       );
       return taskFromService(task);

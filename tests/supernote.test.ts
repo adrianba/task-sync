@@ -248,6 +248,7 @@ class FakeClient implements SupernoteServiceClient {
     if (!task) return Promise.reject(new Error("not found"));
     if (body.title !== undefined) task.title = body.title;
     if (body.status !== undefined) task.status = body.status;
+    if (body.list_id !== undefined) task.list_id = body.list_id;
     task.last_modified = 200;
     return Promise.resolve(task);
   }
@@ -359,6 +360,57 @@ describe("SupernoteAdapter", () => {
     client.notFoundOnDelete = true;
     const adapter = makeAdapter(client);
     await expect(adapter.deleteTask("", "t".repeat(32))).resolves.toBeUndefined();
+  });
+
+  it("getTask returns a moved task even when its current list differs from the hint", async () => {
+    // A cross-list move on the device preserves the task id but changes list_id.
+    // getTask must return the live row regardless of the caller's last-known
+    // list, so the engine sees a move rather than a deletion.
+    const client = new FakeClient();
+    const id = "t".repeat(32);
+    client.tasks = [svcTask({ id, list_id: "L".repeat(32), title: "Moved" })];
+    const adapter = makeAdapter(client);
+    const ext = await adapter.getTask("", id); // caller still thinks it is in the Inbox
+    expect(ext).not.toBeNull();
+    expect(ext!.externalId).toBe(id);
+    expect(ext!.listId).toBe("L".repeat(32)); // the true current list
+  });
+
+  it("getTask returns null only when the task is genuinely gone", async () => {
+    const client = new FakeClient();
+    const adapter = makeAdapter(client);
+    expect(await adapter.getTask("", "z".repeat(32))).toBeNull();
+  });
+
+  it("moveTask re-points list_id and returns the updated task", async () => {
+    const client = new FakeClient();
+    const id = "t".repeat(32);
+    client.tasks = [svcTask({ id, list_id: null, last_modified: 50 })];
+    const adapter = makeAdapter(client);
+    const moved = await adapter.moveTask!(id, "L".repeat(32), new Date(50).toISOString());
+    expect(client.lastUpdate?.body).toEqual({ list_id: "L".repeat(32) });
+    expect(client.lastUpdate?.expected).toBe(50);
+    expect(moved.listId).toBe("L".repeat(32));
+  });
+
+  it("moveTask to the Inbox sends a null list_id", async () => {
+    const client = new FakeClient();
+    const id = "t".repeat(32);
+    client.tasks = [svcTask({ id, list_id: "L".repeat(32) })];
+    const adapter = makeAdapter(client);
+    const moved = await adapter.moveTask!(id, "");
+    expect(client.lastUpdate?.body).toEqual({ list_id: null });
+    expect(moved.listId).toBe("");
+  });
+
+  it("moveTask translates a service 409 into an ExternalConflictError", async () => {
+    const client = new FakeClient();
+    client.tasks = [svcTask({ id: "t".repeat(32) })];
+    client.conflictOnUpdate = true;
+    const adapter = makeAdapter(client);
+    await expect(
+      adapter.moveTask!("t".repeat(32), "L".repeat(32), new Date(1).toISOString()),
+    ).rejects.toBeInstanceOf(ExternalConflictError);
   });
 
   it("splits delta results into changed and removed when given a cursor", async () => {

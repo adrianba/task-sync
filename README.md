@@ -414,6 +414,26 @@ present, otherwise a new block appended to the **Sync Inbox** note). No
 `SUPERNOTE_TAG_LIST_MAP` entry is needed — the adapter handles the Inbox
 specially in both directions.
 
+### Moving a task between lists
+
+A task's **list membership** is kept in sync both ways for backends that support
+a native cross-list move (Supernote does; Microsoft To Do does not, so a vault
+tag change is a no-op there):
+
+- **In the vault → backend:** retagging a task's block (e.g. moving the line from
+  an `#inbox` block to a `#work` block) moves the corresponding backend task to
+  the matching list. The task keeps its identity — no delete-and-recreate.
+- **On the device → vault:** moving a task to another Supernote list relocates
+  its markdown line into the block for that list's tag (an existing block if one
+  exists anywhere in the vault, otherwise a new `#<tag>` block in the **Sync
+  Inbox** note). The line keeps its `sync-id`, so it is **not** duplicated.
+- **Both sides moved** (a conflict) resolves **vault-wins**: the backend task is
+  moved to match the vault's tag.
+
+A device move to a list whose tag is **not** defined leaves the markdown line
+where it is (the task is out of scope for that list), mirroring how
+externally-created tasks in undefined lists are ignored.
+
 ---
 
 ## Conflict resolution

@@ -6,6 +6,7 @@ import {
   applyMutationToLine,
   applyMutations,
   appendLines,
+  removeLine,
 } from "../src/writer/markdownWriter.js";
 
 describe("writer/applyMutationToLine (pure)", () => {
@@ -169,5 +170,47 @@ describe("writer/appendLines", () => {
     });
 
     expect(await readFile(file, "utf8")).toBe("# Inbox\n- [ ] external\n- [ ] appended\n");
+  });
+});
+
+describe("writer/removeLine (atomic, optimistic)", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(process.cwd(), ".ts-remove-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("removes the matching line and leaves the rest byte-for-byte", async () => {
+    const file = join(dir, "n.md");
+    await writeFile(file, "#todo\n- [ ] a\n- [ ] b\n- [ ] c\n", "utf8");
+    const res = await removeLine(file, 2, "- [ ] b");
+    expect(res.changed).toBe(true);
+    expect(res.conflicts).toBe(0);
+    expect(await readFile(file, "utf8")).toBe("#todo\n- [ ] a\n- [ ] c\n");
+  });
+
+  it("is a conflict no-op when the target line no longer matches", async () => {
+    const file = join(dir, "n.md");
+    await writeFile(file, "#todo\n- [ ] a\n- [ ] b\n", "utf8");
+    const res = await removeLine(file, 1, "- [ ] DIFFERENT");
+    expect(res.changed).toBe(false);
+    expect(res.conflicts).toBe(1);
+    expect(await readFile(file, "utf8")).toBe("#todo\n- [ ] a\n- [ ] b\n");
+  });
+
+  it("invokes the onWillWrite hook before writing (loop protection)", async () => {
+    const file = join(dir, "n.md");
+    await writeFile(file, "- [ ] keep\n- [ ] drop\n", "utf8");
+    let hookCalls = 0;
+    const res = await removeLine(file, 1, "- [ ] drop", {
+      onWillWrite: () => {
+        hookCalls++;
+      },
+    });
+    expect(res.changed).toBe(true);
+    expect(hookCalls).toBe(1);
+    expect(await readFile(file, "utf8")).toBe("- [ ] keep\n");
   });
 });

@@ -37,6 +37,7 @@ import {
   applyMutations,
   appendLines,
   insertLineAfter,
+  removeLine,
   reorderTaskLines,
   type ApplyResult,
   type ReorderItem,
@@ -72,6 +73,10 @@ export interface ReconcileResult {
   reorderedOutbound: number;
   /** Tasks whose markdown line was moved to reflect a backend's order. */
   reorderedInbound: number;
+  /** Tasks moved to a different backend list to reflect a vault tag change. */
+  movedOutbound: number;
+  /** Tasks whose markdown line was relocated to reflect a backend list move. */
+  movedInbound: number;
 }
 
 function emptyResult(): ReconcileResult {
@@ -85,6 +90,8 @@ function emptyResult(): ReconcileResult {
     conflicts: 0,
     reorderedOutbound: 0,
     reorderedInbound: 0,
+    movedOutbound: 0,
+    movedInbound: 0,
   };
 }
 
@@ -111,6 +118,54 @@ interface InboundApplyResult {
 interface FetchedExternalTasks {
   changed: ExternalTask[];
   removedIds: string[];
+}
+
+/** A backend's list name↔id lookup, built once per reconcile pass. */
+interface BackendListIndex {
+  /** Lowercased list display name → list id. */
+  nameToId: Map<string, string>;
+  /** List id → display name (as the backend reports it). */
+  idToName: Map<string, string>;
+}
+
+/**
+ * A deferred inbound list relocation: an external task was moved to a different
+ * list on the backend, so its markdown line must be relocated to the matching
+ * tag block. Applied *after* the file walk so mid-pass line-index churn cannot
+ * corrupt other edits (mirrors the ordering pass).
+ */
+interface PendingRelocation {
+  syncId: string;
+  backend: string;
+  fromAbsPath: string;
+  /** Destination tag-path (e.g. `life`) resolved from the new external list. */
+  toTag: string;
+  /** The task's new external list id, to write onto the link on success. */
+  externalListId: string;
+}
+
+/**
+ * Per-pass state for list-membership (move) reconciliation. Threaded through the
+ * file walk so outbound moves are applied inline and inbound moves are queued
+ * for a post-walk relocation phase.
+ */
+interface MoveContext {
+  /** When false (incremental watcher passes), inbound relocations are skipped. */
+  allowInboundRelocation: boolean;
+  pending: PendingRelocation[];
+  listIndexByBackend: Map<string, BackendListIndex>;
+}
+
+/** Result of list-membership reconciliation for one (task, backend). */
+interface MoveOutcome {
+  /** The list id the field reconcile should use (post outbound move). */
+  effectiveListId: string;
+  /** The freshest external `lastModified` (post outbound move). */
+  extLastModified: string | undefined;
+  /** True when an inbound relocation was queued for the post-walk phase. */
+  deferred: boolean;
+  /** True when an outbound move hit a write conflict; skip the task this pass. */
+  conflictSkipped: boolean;
 }
 
 /** A linked vault task participating in per-list ordering reconciliation. */
@@ -210,8 +265,16 @@ export class SyncEngine {
   /** Run a full reconciliation pass over the whole vault. */
   async reconcile(): Promise<ReconcileResult> {
     const files = await this.listMarkdownFiles(this.options.vaultPath);
-    const filesResult = await this.reconcileFiles(files, false);
+    const moveCtx: MoveContext = {
+      allowInboundRelocation: true,
+      pending: [],
+      listIndexByBackend: new Map(),
+    };
+    const filesResult = await this.reconcileFiles(files, false, moveCtx);
     const result = filesResult.result;
+    // Apply any deferred inbound list relocations before the deletion sweep and
+    // ordering pass so the vault reflects the moved tasks' new tag blocks.
+    if (!this.options.dryRun) await this.applyPendingRelocations(moveCtx, result);
     if (!this.options.dryRun && !filesResult.hadReadError) {
       if (!this.hasDefinedTags()) {
         this.log.error("Skipping deletion sweep because no defined task tags are configured");
@@ -252,7 +315,14 @@ export class SyncEngine {
         !this.isIgnored(relative(this.options.vaultPath, p)) &&
         existsSync(p),
     );
-    const { result } = await this.reconcileFiles(relevant, true);
+    const { result } = await this.reconcileFiles(relevant, true, {
+      // Incremental watcher passes are vault-change driven (outbound). Inbound
+      // device moves are handled by the periodic full reconcile; queuing line
+      // relocations here would need the whole-vault view we don't gather.
+      allowInboundRelocation: false,
+      pending: [],
+      listIndexByBackend: new Map(),
+    });
     if (!this.options.dryRun) await this.store.flush();
     return result;
   }
@@ -266,6 +336,7 @@ export class SyncEngine {
   private async reconcileFiles(
     absPaths: string[],
     useFileHashSkip: boolean,
+    moveCtx: MoveContext,
   ): Promise<ReconcileFilesResult> {
     const result = emptyResult();
     const seenSyncIds = new Set<string>();
@@ -310,7 +381,7 @@ export class SyncEngine {
       for (const task of tasks) {
         if (!task.syncId) continue; // dry-run with unassigned ids
         seenSyncIds.add(task.syncId);
-        await this.reconcileTaskAcrossBackends(abs, task, result);
+        await this.reconcileTaskAcrossBackends(abs, task, result, moveCtx);
       }
 
       if (!this.options.dryRun) {
@@ -400,11 +471,12 @@ export class SyncEngine {
     absPath: string,
     task: Task,
     result: ReconcileResult,
+    moveCtx: MoveContext,
   ): Promise<void> {
     let current = task;
     for (const entry of this.backends) {
       try {
-        current = await this.reconcileTaskToBackend(absPath, current, entry, result);
+        current = await this.reconcileTaskToBackend(absPath, current, entry, result, moveCtx);
       } catch (err) {
         // Isolate backend failures so one backend cannot break the others.
         this.log.error("Backend reconcile failed for task", {
@@ -426,6 +498,7 @@ export class SyncEngine {
     task: Task,
     entry: BackendEntry,
     result: ReconcileResult,
+    moveCtx: MoveContext,
   ): Promise<Task> {
     const backend = entry.adapter.backend;
     const syncId = task.syncId;
@@ -459,7 +532,8 @@ export class SyncEngine {
     const listId = link.externalListId ?? (await entry.adapter.ensureList(listName));
     const ext = await entry.adapter.getTask(listId, link.externalId);
 
-    // External task vanished — recreate it outbound.
+    // External task vanished — recreate it outbound. With a list-agnostic
+    // `getTask`, a null here means a genuine deletion (not a cross-list move).
     if (!ext) {
       result.createdOutbound++;
       if (this.options.dryRun) return task;
@@ -477,10 +551,42 @@ export class SyncEngine {
       return task;
     }
 
-    const vaultChanged = curHash !== link.lastKnownHash;
+    // List-membership (move) reconciliation, for backends that support a native
+    // cross-list move. Resolves whether the vault tag and/or the backend list
+    // diverged from the last-synced baseline and applies the vault-wins policy.
+    // `effectiveListId`/`extLastModified` carry any outbound-move side effects
+    // into the field reconcile below.
+    let effectiveListId = listId;
+    let extLastModified = ext.lastModified;
+    if (typeof entry.adapter.moveTask === "function") {
+      const moved = await this.reconcileListMembership(
+        task,
+        entry,
+        link,
+        ext,
+        listName,
+        listId,
+        extLastModified,
+        absPath,
+        moveCtx,
+        result,
+      );
+      if (moved.deferred) {
+        // An external-only move was queued for post-walk relocation; nothing
+        // more to do for list membership. Field changes (if any) still apply.
+      }
+      if (moved.conflictSkipped) return task;
+      effectiveListId = moved.effectiveListId;
+      extLastModified = moved.extLastModified;
+    }
+
+    // Re-read the link in case an outbound move advanced its baseline.
+    const curLink = this.store.getLink(syncId, backend) ?? link;
+
+    const vaultChanged = curHash !== curLink.lastKnownHash;
     const externalChanged =
-      ext.lastModified !== undefined &&
-      ext.lastModified !== link.lastExternalModified;
+      extLastModified !== undefined &&
+      extLastModified !== curLink.lastExternalModified;
 
     if (!vaultChanged && !externalChanged) return task;
 
@@ -494,7 +600,7 @@ export class SyncEngine {
         : 0;
       direction = resolveConflict(entry.conflictPolicy, {
         vaultMtimeMs: mtimeMs,
-        externalModified: ext.lastModified,
+        externalModified: extLastModified,
       });
       this.log.warn("Sync conflict resolved", {
         backend,
@@ -510,10 +616,10 @@ export class SyncEngine {
       let updated: ExternalTask;
       try {
         updated = await entry.adapter.updateTask(
-          listId,
+          effectiveListId,
           link.externalId,
           toInput(task),
-          ext.lastModified,
+          extLastModified,
         );
       } catch (err) {
         if (err instanceof ExternalConflictError) {
@@ -529,8 +635,8 @@ export class SyncEngine {
         throw err;
       }
       await this.persistLink({
-        ...link,
-        externalListId: listId,
+        ...curLink,
+        externalListId: effectiveListId,
         lastKnownHash: curHash,
         ...(updated.lastModified !== undefined
           ? { lastExternalModified: updated.lastModified }
@@ -554,15 +660,287 @@ export class SyncEngine {
       return task;
     }
     await this.persistLink({
-      ...link,
-      externalListId: listId,
+      ...curLink,
+      externalListId: effectiveListId,
       lastKnownHash: hashTask(inbound.task),
-      ...(ext.lastModified !== undefined
-        ? { lastExternalModified: ext.lastModified }
+      ...(extLastModified !== undefined
+        ? { lastExternalModified: extLastModified }
         : {}),
       lastSyncedAt: new Date().toISOString(),
     });
     return inbound.task;
+  }
+
+  /**
+   * Reconcile a task's **list membership** with a move-capable backend. Resolves
+   * three lists: the last-synced baseline (`link.externalListId`), the vault's
+   * desired list (from its block tag), and the backend's current list
+   * (`ext.listId`). Policy:
+   *  - vault moved (vault-wins, also resolves the both-moved conflict): PATCH the
+   *    backend task to the desired list and advance the link inline.
+   *  - external moved only (inbound): queue a post-walk relocation of the
+   *    markdown line into the matching tag block; the baseline is advanced only
+   *    once that relocation succeeds, so a failed relocation cannot trigger a
+   *    spurious vault-wins reversal on the next pass.
+   */
+  private async reconcileListMembership(
+    task: Task,
+    entry: BackendEntry,
+    link: ExternalLink,
+    ext: ExternalTask,
+    listName: string,
+    baselineListId: string,
+    extLastModified: string | undefined,
+    absPath: string,
+    moveCtx: MoveContext,
+    result: ReconcileResult,
+  ): Promise<MoveOutcome> {
+    const backend = entry.adapter.backend;
+    const syncId = task.syncId!;
+    const noMove: MoveOutcome = {
+      effectiveListId: baselineListId,
+      extLastModified,
+      deferred: false,
+      conflictSkipped: false,
+    };
+
+    const idx = await this.getListIndex(entry, moveCtx);
+    const externalCurListId = ext.listId;
+    const baselineName = idx.idToName.get(baselineListId);
+    const vaultMoved =
+      baselineName !== undefined &&
+      baselineName.trim().toLowerCase() !== listName.trim().toLowerCase();
+    const externalMoved = externalCurListId !== baselineListId;
+
+    if (vaultMoved) {
+      // Vault-wins (covers the both-moved conflict): move the backend task to
+      // the vault's desired list. The markdown line stays put.
+      const desiredListId = await this.resolveDesiredListId(entry, listName, idx);
+      if (desiredListId === undefined) return noMove;
+      let newExtMod = extLastModified;
+      if (externalCurListId !== desiredListId) {
+        try {
+          const movedTask = await entry.adapter.moveTask!(
+            link.externalId,
+            desiredListId,
+            extLastModified,
+          );
+          newExtMod = movedTask.lastModified ?? extLastModified;
+        } catch (err) {
+          if (err instanceof ExternalConflictError) {
+            result.conflicts++;
+            this.log.warn("Skipped outbound list move due to external write conflict", {
+              backend,
+              syncId,
+            });
+            return { ...noMove, conflictSkipped: true };
+          }
+          throw err;
+        }
+        result.movedOutbound++;
+        this.log.info("Moved external task to match vault tag", {
+          backend,
+          syncId,
+          fromListId: externalCurListId,
+          toListId: desiredListId,
+        });
+      }
+      await this.persistLink({
+        ...link,
+        externalListId: desiredListId,
+        ...(newExtMod !== undefined ? { lastExternalModified: newExtMod } : {}),
+        lastSyncedAt: new Date().toISOString(),
+      });
+      return {
+        effectiveListId: desiredListId,
+        extLastModified: newExtMod,
+        deferred: false,
+        conflictSkipped: false,
+      };
+    }
+
+    if (externalMoved && moveCtx.allowInboundRelocation) {
+      const tag = this.tagForExternalList(entry, externalCurListId, idx);
+      if (tag === undefined) {
+        // The backend's new list maps to a non-defined (out-of-scope) tag — leave
+        // the markdown line where it is, mirroring how out-of-scope inbound tasks
+        // are ignored. The field reconcile still advances the baseline so we do
+        // not re-evaluate this move every pass.
+        this.log.debug("Inbound list move targets a non-defined tag; leaving line in place", {
+          backend,
+          syncId,
+          externalListId: externalCurListId,
+        });
+        return noMove;
+      }
+      moveCtx.pending.push({
+        syncId,
+        backend,
+        fromAbsPath: absPath,
+        toTag: tag,
+        externalListId: externalCurListId,
+      });
+      this.log.info("Queued inbound relocation for moved external task", {
+        backend,
+        syncId,
+        toTag: tag,
+        externalListId: externalCurListId,
+      });
+      // Do not advance the baseline list here; the post-walk relocation does so
+      // only on success.
+      return { ...noMove, deferred: true };
+    }
+
+    return noMove;
+  }
+
+  /** Build (once per pass) a backend's list name↔id index, including the Inbox. */
+  private async getListIndex(entry: BackendEntry, moveCtx: MoveContext): Promise<BackendListIndex> {
+    const backend = entry.adapter.backend;
+    const cached = moveCtx.listIndexByBackend.get(backend);
+    if (cached) return cached;
+    const nameToId = new Map<string, string>();
+    const idToName = new Map<string, string>();
+    for (const list of await entry.adapter.listLists()) {
+      nameToId.set(list.name.trim().toLowerCase(), list.id);
+      idToName.set(list.id, list.name);
+    }
+    const idx: BackendListIndex = { nameToId, idToName };
+    moveCtx.listIndexByBackend.set(backend, idx);
+    return idx;
+  }
+
+  /**
+   * Resolve the backend list id a vault list name should map to, creating the
+   * list if it does not yet exist (only reached for a genuine outbound move to a
+   * new list). Returns undefined in dry-run when the list is unknown.
+   */
+  private async resolveDesiredListId(
+    entry: BackendEntry,
+    listName: string,
+    idx: BackendListIndex,
+  ): Promise<string | undefined> {
+    const key = listName.trim().toLowerCase();
+    const existing = idx.nameToId.get(key);
+    if (existing !== undefined) return existing;
+    if (this.options.dryRun) return undefined;
+    const id = await entry.adapter.ensureList(listName);
+    idx.nameToId.set(key, id);
+    idx.idToName.set(id, listName);
+    return id;
+  }
+
+  /**
+   * The defined tag-path a backend list maps to, or undefined if the list maps
+   * to an out-of-scope (non-defined) tag and so should not receive a relocation.
+   */
+  private tagForExternalList(
+    entry: BackendEntry,
+    externalListId: string,
+    idx: BackendListIndex,
+  ): string | undefined {
+    const name = idx.idToName.get(externalListId);
+    if (name === undefined) return undefined;
+    const tag = listNameToTag(name, entry.tagListMap);
+    const main = tag.split("/", 1)[0] ?? tag;
+    if (!this.options.definedTags.some((defined) => normalizeTag(defined) === main)) {
+      return undefined;
+    }
+    return tag;
+  }
+
+  /**
+   * Apply queued inbound relocations after the file walk: move each task's
+   * markdown line out of its current file and into the block for its new tag.
+   * Each step re-reads the source (a field reconcile may have rewritten the
+   * line) and is optimistic — a concurrent edit defers the relocation to the
+   * next pass rather than risk duplicating or losing the line.
+   */
+  private async applyPendingRelocations(
+    moveCtx: MoveContext,
+    result: ReconcileResult,
+  ): Promise<void> {
+    if (moveCtx.pending.length === 0) return;
+    const inboxAbs = join(this.options.vaultPath, this.options.inboundInboxFile);
+    const opts = {
+      ...(this.options.suppressNext ? { onWillWrite: this.options.suppressNext } : {}),
+    };
+
+    for (const reloc of moveCtx.pending) {
+      try {
+        const link = this.store.getLink(reloc.syncId, reloc.backend);
+        if (!link) continue; // link removed concurrently (e.g. deletion)
+
+        let tasks: Task[];
+        try {
+          tasks = await this.parseFile(reloc.fromAbsPath);
+        } catch (err) {
+          this.log.warn("Relocation: failed to read source file; retry next pass", {
+            file: relative(this.options.vaultPath, reloc.fromAbsPath).split(sep).join("/"),
+            err,
+          });
+          continue;
+        }
+        const current = tasks.find((t) => t.syncId === reloc.syncId);
+        if (current === undefined) {
+          // Line already gone from this file; just align the link's list.
+          await this.persistLink({
+            ...link,
+            externalListId: reloc.externalListId,
+            lastSyncedAt: new Date().toISOString(),
+          });
+          continue;
+        }
+
+        // Already under the destination tag (e.g. user moved it manually, or a
+        // prior partial run): align the link only, no line move.
+        if (
+          current.blockTag !== undefined &&
+          current.blockTag.toLowerCase() === reloc.toTag.toLowerCase()
+        ) {
+          await this.persistLink({
+            ...link,
+            externalListId: reloc.externalListId,
+            lastSyncedAt: new Date().toISOString(),
+          });
+          continue;
+        }
+
+        const lineText = current.rawLine;
+        const removed = await removeLine(reloc.fromAbsPath, current.location.line, lineText, opts);
+        if (!removed.changed) {
+          this.log.warn("Relocation: source line changed; retry next pass", {
+            backend: reloc.backend,
+            syncId: reloc.syncId,
+          });
+          continue;
+        }
+
+        // Rebuild the block index from fresh disk state (the remove shifted line
+        // indices). `fallbackToInbox` guarantees the line lands somewhere even if
+        // an existing-block anchor went stale, so it is never lost.
+        const blockIndex = await this.buildBlockIndex();
+        await this.insertLineForTag(reloc.toTag, lineText, inboxAbs, blockIndex, opts, true);
+
+        await this.persistLink({
+          ...link,
+          externalListId: reloc.externalListId,
+          lastSyncedAt: new Date().toISOString(),
+        });
+        result.movedInbound++;
+        this.log.info("Relocated task line to match backend list move", {
+          backend: reloc.backend,
+          syncId: reloc.syncId,
+          toTag: reloc.toTag,
+        });
+      } catch (err) {
+        this.log.error("Inbound relocation failed", {
+          backend: reloc.backend,
+          syncId: reloc.syncId,
+          err,
+        });
+      }
+    }
   }
 
   /** Apply an external change onto the vault line and return the new task. */
@@ -728,46 +1106,13 @@ export class SyncEngine {
       ...(this.options.suppressNext ? { onWillWrite: this.options.suppressNext } : {}),
     };
 
-    // Prefer inserting into an existing block for this tag (from the per-pass
-    // index). On success, advance the index anchor to the just-inserted line so
-    // the next inbound task for this tag lands beneath it (preserving order).
-    const target = blockIndex.get(tag);
-    if (target) {
-      const res = await insertLineAfter(target.absPath, target.afterLine, target.expectedLine, line, opts);
-      if (!res.changed) {
-        // Anchor is stale (file changed under us); drop it and retry next pass.
-        blockIndex.delete(tag);
-        this.log.warn("Could not insert inbound task into existing block; retry next pass", {
-          backend,
-          tag,
-          file: relative(this.options.vaultPath, target.absPath).split(sep).join("/"),
-        });
-        return false;
-      }
-      blockIndex.set(tag, {
-        absPath: target.absPath,
-        afterLine: target.afterLine + 1,
-        expectedLine: line,
+    const inserted = await this.insertLineForTag(tag, line, inboxAbs, blockIndex, opts, false);
+    if (!inserted) {
+      this.log.warn("Could not insert inbound task into existing block; retry next pass", {
+        backend,
+        tag,
       });
-    } else {
-      const exists = existsSync(inboxAbs);
-      await appendLines(
-        inboxAbs,
-        exists ? ["", `#${tag}`, line] : ["# Sync Inbox", "", `#${tag}`, line],
-        opts,
-      );
-      // Record the freshly-created inbox block so further same-tag tasks in this
-      // pass insert into it instead of creating duplicate `#tag` blocks.
-      try {
-        const content = await readFile(inboxAbs, "utf8");
-        const lines = content.split("\n");
-        const idx = lines.lastIndexOf(line);
-        if (idx >= 0) {
-          blockIndex.set(tag, { absPath: inboxAbs, afterLine: idx, expectedLine: line });
-        }
-      } catch {
-        // Non-fatal: the next pass will rebuild the index from disk.
-      }
+      return false;
     }
 
     await this.persistLink({
@@ -780,6 +1125,65 @@ export class SyncEngine {
         : {}),
       lastSyncedAt: new Date().toISOString(),
     });
+    return true;
+  }
+
+  /**
+   * Insert a single task `line` under the block for `tag`: into the per-pass
+   * index's existing block if present (advancing the anchor so same-tag inserts
+   * chain), else by appending a fresh `#tag` block to the Sync Inbox note.
+   *
+   * Returns false only when an existing-block anchor went stale and
+   * `fallbackToInbox` is false (the caller retries next pass). With
+   * `fallbackToInbox` true a stale anchor falls back to the Sync Inbox append so
+   * the line is guaranteed to land somewhere (used by inbound relocation, where
+   * the source line has already been removed and must not be lost).
+   */
+  private async insertLineForTag(
+    tag: string,
+    line: string,
+    inboxAbs: string,
+    blockIndex: Map<string, BlockAnchor>,
+    opts: { onWillWrite?: (absPath: string) => void },
+    fallbackToInbox: boolean,
+  ): Promise<boolean> {
+    const target = blockIndex.get(tag);
+    if (target) {
+      const res = await insertLineAfter(target.absPath, target.afterLine, target.expectedLine, line, opts);
+      if (res.changed) {
+        // Advance the anchor to the just-inserted line so the next same-tag task
+        // lands beneath it (preserving order).
+        blockIndex.set(tag, {
+          absPath: target.absPath,
+          afterLine: target.afterLine + 1,
+          expectedLine: line,
+        });
+        return true;
+      }
+      // Anchor is stale (file changed under us); drop it.
+      blockIndex.delete(tag);
+      if (!fallbackToInbox) return false;
+      // else fall through to the guaranteed Sync Inbox append.
+    }
+
+    const exists = existsSync(inboxAbs);
+    await appendLines(
+      inboxAbs,
+      exists ? ["", `#${tag}`, line] : ["# Sync Inbox", "", `#${tag}`, line],
+      opts,
+    );
+    // Record the freshly-created inbox block so further same-tag tasks in this
+    // pass insert into it instead of creating duplicate `#tag` blocks.
+    try {
+      const content = await readFile(inboxAbs, "utf8");
+      const lines = content.split("\n");
+      const idx = lines.lastIndexOf(line);
+      if (idx >= 0) {
+        blockIndex.set(tag, { absPath: inboxAbs, afterLine: idx, expectedLine: line });
+      }
+    } catch {
+      // Non-fatal: the next pass will rebuild the index from disk.
+    }
     return true;
   }
 

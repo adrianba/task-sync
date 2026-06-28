@@ -97,6 +97,14 @@ export interface SyncAdapter {
   ensureList(name: string): Promise<string>;
 
   listTasks(listId: string): Promise<ExternalTask[]>;
+  /**
+   * Look up a task by id. `listId` is the caller's last-known list and is a hint
+   * only: the returned task is the live row regardless of which list it now
+   * belongs to (a task may have been moved between lists on the backend). The
+   * caller MUST inspect `ExternalTask.listId` to learn the current list rather
+   * than assume it equals `listId`. Returns `null` only when the task no longer
+   * exists (genuinely deleted), never merely because it moved lists.
+   */
   getTask(listId: string, externalId: string): Promise<ExternalTask | null>;
   createTask(listId: string, input: ExternalTaskInput): Promise<ExternalTask>;
   /**
@@ -118,6 +126,23 @@ export interface SyncAdapter {
    * as success and return normally rather than throwing.
    */
   deleteTask(listId: string, externalId: string, expectedVersion?: string): Promise<void>;
+
+  /**
+   * Move a task to a different list, preserving its identity (`externalId`).
+   * Optional: only backends that support a cross-list move natively (e.g.
+   * Supernote, which re-points the task's `list_id`) implement it. The engine
+   * capability-gates list-membership reconciliation on its presence; backends
+   * without it (e.g. Microsoft To Do, where a move is a delete+create) leave it
+   * undefined and a vault tag change is a no-op for them.
+   *
+   * `expectedVersion` has the same optimistic-concurrency semantics as
+   * `updateTask`. Returns the updated task (with its new `listId`).
+   */
+  moveTask?(
+    externalId: string,
+    toListId: string,
+    expectedVersion?: string,
+  ): Promise<ExternalTask>;
 
   /** Incremental change pull for a list, given a previous token (if any). */
   delta?(listId: string, token?: string): Promise<DeltaResult>;

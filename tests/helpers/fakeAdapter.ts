@@ -15,16 +15,40 @@ import type {
 export class FakeAdapter implements SyncAdapter {
   readonly backend: string;
   readonly ordered: boolean;
+  /** When true, exposes `moveTask` (a native cross-list move). */
+  readonly movable: boolean;
   private clock = 1;
   private readonly lists = new Map<string, ExternalList>();
   private readonly tasks = new Map<string, ExternalTask>();
   initCalls = 0;
   closeCalls = 0;
+  /** Records every moveTask call, for assertions. */
+  moveCalls: { externalId: string; toListId: string }[] = [];
 
-  constructor(backend = "fake", ordered = false) {
+  constructor(backend = "fake", ordered = false, movable = false) {
     this.backend = backend;
     this.ordered = ordered;
+    this.movable = movable;
+    if (movable) {
+      // Only expose the optional capability when requested, so the engine's
+      // `typeof adapter.moveTask === "function"` capability gate matches a real
+      // backend that does (Supernote) or does not (Microsoft To Do) support it.
+      this.moveTask = (
+        externalId: string,
+        toListId: string,
+        _expectedVersion?: string,
+      ): Promise<ExternalTask> => {
+        const existing = this.tasks.get(externalId);
+        if (!existing) throw new Error(`No such task ${externalId}`);
+        this.moveCalls.push({ externalId, toListId });
+        const updated: ExternalTask = { ...existing, listId: toListId, lastModified: this.now() };
+        this.tasks.set(externalId, updated);
+        return Promise.resolve(updated);
+      };
+    }
   }
+
+  moveTask?: SyncAdapter["moveTask"];
 
   private now(): string {
     return new Date(this.clock++ * 1000).toISOString();
@@ -129,6 +153,25 @@ export class FakeAdapter implements SyncAdapter {
     };
     this.tasks.set(task.externalId, task);
     return task;
+  }
+
+  /** The id of a list by display name, creating it if necessary. */
+  listIdByName(name: string): string {
+    for (const l of this.lists.values()) if (l.name === name) return l.id;
+    const id = randomUUID();
+    this.lists.set(id, { id, name });
+    return id;
+  }
+
+  /**
+   * Simulate a device-side cross-list move: preserve the task id, re-point its
+   * list (creating the target list if needed) and bump `lastModified`.
+   */
+  simulateDeviceMove(externalId: string, toListName: string): void {
+    const existing = this.tasks.get(externalId);
+    if (!existing) throw new Error(`No such task ${externalId}`);
+    const listId = this.listIdByName(toListName);
+    this.tasks.set(externalId, { ...existing, listId, lastModified: this.now() });
   }
 
   allTasks(): ExternalTask[] {

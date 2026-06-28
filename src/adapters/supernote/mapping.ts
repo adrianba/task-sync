@@ -114,6 +114,11 @@ export function inputToCreate(listId: string, input: ExternalTaskInput): Service
   return body;
 }
 
+/** Build a PATCH body that moves a task to `toListId` (Inbox = `""`). */
+export function moveToUpdate(toListId: string): ServiceTaskUpdate {
+  return { list_id: listIdToService(toListId) };
+}
+
 /** Build a PATCH body from a partial input (omitted fields are left unchanged). */
 export function patchToUpdate(patch: Partial<ExternalTaskInput>): ServiceTaskUpdate {
   const body: ServiceTaskUpdate = {};

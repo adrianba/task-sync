@@ -278,8 +278,42 @@ export async function insertLineAfter(
 
 
 
-async function readFileIfExists(absPath: string): Promise<string> {
-  try {
+/**
+ * Remove the single line at 0-based `line`, whose current text must still equal
+ * `expectedLine` (optimistic concurrency). Used to pull a task line out of its
+ * current file during an inbound cross-list relocation (the line is then
+ * re-inserted elsewhere). Atomic; returns `{ changed:false, conflicts:1 }` if
+ * the target line no longer matches, so the caller can retry next pass without
+ * risking removal of the wrong line.
+ */
+export async function removeLine(
+  absPath: string,
+  line: number,
+  expectedLine: string,
+  options: ApplyMutationsOptions = {},
+): Promise<ApplyResult> {
+  for (let attempt = 0; attempt < maxCasAttempts; attempt++) {
+    const original = await readFile(absPath, "utf8");
+    const lines = original.split("\n");
+    if (lines[line] !== expectedLine) {
+      return { changed: false, conflicts: 1 };
+    }
+    lines.splice(line, 1);
+    const updated = lines.join("\n");
+    if (options.dryRun) return { changed: true, conflicts: 0 };
+
+    const beforeHook = await readFile(absPath, "utf8");
+    if (beforeHook !== original) continue;
+    options.onWillWrite?.(absPath);
+    const currentOnDisk = await readFile(absPath, "utf8");
+    if (currentOnDisk !== original) continue;
+    await atomicWriteFile(absPath, updated);
+    return { changed: true, conflicts: 0 };
+  }
+  return { changed: false, conflicts: 0, skippedDueToConcurrentEdit: true };
+}
+
+async function readFileIfExists(absPath: string): Promise<string> {  try {
     return await readFile(absPath, "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";

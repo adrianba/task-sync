@@ -128,7 +128,11 @@ export class Service {
         const r = await this.engine!.reconcile();
         // Always log periodic polls so liveness is visible (not silent when
         // idle). The message distinguishes passes that applied inbound changes.
-        const applied = r.updatedInbound > 0 || r.inboundCreated > 0;
+        const applied =
+          r.updatedInbound > 0 ||
+          r.inboundCreated > 0 ||
+          r.movedInbound > 0 ||
+          r.movedOutbound > 0;
         this.log.info(
           applied ? "Periodic reconcile applied inbound changes" : "Periodic reconcile complete",
           { ...r },
