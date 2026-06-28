@@ -162,7 +162,11 @@ engine to a specific provider.
 - **Optimistic concurrency:** updates send `If-Unmodified-Since: <ms>` from the
   freshly-read `lastModified`; a `409` surfaces as `ExternalConflictError`
   (`src/adapters/types.ts`) which the engine catches and defers. Deletes are
-  unconditional (vault-wins deletion should win).
+  unconditional (vault-wins deletion should win) and **idempotent**: a `404`
+  (task already gone, e.g. deleted on the device) is treated as success so the
+  engine prunes the stale link instead of re-attempting the same DELETE every
+  reconcile pass. The engine also prunes defensively on any not-found-typed
+  error (`isNotFoundError` in `syncEngine.ts`).
 - **Not round-tripped:** completed (`done`) date and a task `start` date — the
   service sets completion time itself and has no start-date column.
 - IDs are still **32-char lowercase hex**; status is `needsAction` / `completed`.

@@ -348,6 +348,19 @@ export class SyncEngine {
           externalId: link.externalId,
         });
       } catch (err) {
+        if (isNotFoundError(err)) {
+          // The external task is already gone (deleted on the device/backend).
+          // Adapters normally swallow this, but guard generically too: prune the
+          // stale link so we stop retrying the same delete every reconcile pass.
+          this.store.deleteLink(link.syncId, link.backend);
+          deleted++;
+          this.log.info("Pruned stale link for already-absent external task", {
+            backend: link.backend,
+            syncId: link.syncId,
+            externalId: link.externalId,
+          });
+          continue;
+        }
         this.log.warn("Failed to delete external task for removed vault task", {
           backend: link.backend,
           syncId: link.syncId,
@@ -1070,6 +1083,18 @@ function seqEqual(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
+}
+
+/**
+ * Generic detection of an "already gone" (HTTP 404) backend error. Adapters
+ * normally translate a 404 delete into success, but this lets the engine prune
+ * a stale link defensively for any adapter that surfaces a not-found error.
+ */
+function isNotFoundError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  if ("status" in err && (err as { status?: unknown }).status === 404) return true;
+  const name = (err as { name?: unknown }).name;
+  return typeof name === "string" && name.includes("NotFound");
 }
 
 /** Best-effort in-memory merge when re-parsing cannot find the task. */

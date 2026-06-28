@@ -112,7 +112,11 @@ export interface SyncAdapter {
     patch: Partial<ExternalTaskInput>,
     expectedVersion?: string,
   ): Promise<ExternalTask>;
-  /** Delete a task; `expectedVersion` has the same semantics as `updateTask`. */
+  /**
+   * Delete a task; `expectedVersion` has the same semantics as `updateTask`.
+   * Must be idempotent: if the target task is already gone (HTTP 404), treat it
+   * as success and return normally rather than throwing.
+   */
   deleteTask(listId: string, externalId: string, expectedVersion?: string): Promise<void>;
 
   /** Incremental change pull for a list, given a previous token (if any). */

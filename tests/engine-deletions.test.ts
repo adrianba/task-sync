@@ -115,6 +115,43 @@ describe("SyncEngine deletion reconciliation", () => {
     expect(store.allLinks()).toHaveLength(0);
   });
 
+  it("prunes the link (no repeated retries) when the external task is already gone", async () => {
+    const file = join(vault, "Work.md");
+    await writeFile(file, "#todo\n- [ ] Remove me\n");
+    // Simulate a backend whose task was already deleted (e.g. on the device):
+    // deleteTask surfaces a 404-typed error instead of swallowing it.
+    class AlreadyGoneAdapter extends DeletionAwareAdapter {
+      deleteAttempts = 0;
+      override async deleteTask(listId: string, externalId: string): Promise<void> {
+        this.deleteAttempts++;
+        // The task is already gone on the backend: remove it from our store so
+        // delta won't re-import it, then surface a 404-typed error like a real
+        // service would for a missing resource.
+        await super.deleteTask(listId, externalId);
+        throw Object.assign(new Error("not found"), {
+          name: "SupernoteNotFoundError",
+          status: 404,
+        });
+      }
+    }
+    const adapter = new AlreadyGoneAdapter("alpha");
+    const { engine, store } = await newEngine([entry(adapter)]);
+    await engine.reconcile();
+    expect(store.allLinks()).toHaveLength(1);
+
+    await writeFile(file, "");
+    const result = await engine.reconcile();
+
+    expect(result.deletedExternal).toBe(1);
+    expect(adapter.deleteAttempts).toBe(1);
+    expect(store.allLinks()).toHaveLength(0);
+
+    // A subsequent pass must not retry the (now pruned) delete.
+    const again = await engine.reconcile();
+    expect(again.deletedExternal).toBe(0);
+    expect(adapter.deleteAttempts).toBe(1);
+  });
+
   it("skips the deletion sweep when the vault still has checklist items but none are in scope", async () => {
     const file = join(vault, "Work.md");
     await writeFile(file, "#todo\n- [ ] Keep me safe\n");

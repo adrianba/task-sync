@@ -163,6 +163,8 @@ class FakeClient implements SupernoteServiceClient {
   public sinceCalls: (number | undefined)[] = [];
   /** Result of the version() probe; undefined simulates an unreachable service. */
   public versionResult: string | undefined = "1.2.3";
+  /** When true, deleteTask rejects with a 404 (task already gone on the service). */
+  public notFoundOnDelete = false;
 
   listLists(): Promise<ServiceTaskList[]> {
     return Promise.resolve(this.lists);
@@ -250,6 +252,16 @@ class FakeClient implements SupernoteServiceClient {
     return Promise.resolve(task);
   }
   deleteTask(taskId: string): Promise<void> {
+    if (this.notFoundOnDelete) {
+      return Promise.reject(
+        new SupernoteNotFoundError({
+          method: "DELETE",
+          url: `https://x/v1/tasks/${taskId}`,
+          code: "not_found",
+          body: "{}",
+        }),
+      );
+    }
     const task = this.tasks.find((t) => t.id === taskId);
     if (task) task.is_deleted = true;
     return Promise.resolve();
@@ -316,6 +328,13 @@ describe("SupernoteAdapter", () => {
     await expect(
       adapter.updateTask("", "t".repeat(32), { title: "X" }, new Date(1).toISOString()),
     ).rejects.toBeInstanceOf(ExternalConflictError);
+  });
+
+  it("treats a 404 on delete as idempotent success (already gone)", async () => {
+    const client = new FakeClient();
+    client.notFoundOnDelete = true;
+    const adapter = makeAdapter(client);
+    await expect(adapter.deleteTask("", "t".repeat(32))).resolves.toBeUndefined();
   });
 
   it("splits delta results into changed and removed when given a cursor", async () => {

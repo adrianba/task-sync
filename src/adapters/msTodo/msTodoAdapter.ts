@@ -89,7 +89,15 @@ export class MsTodoAdapter implements SyncAdapter {
   }
 
   async deleteTask(listId: string, externalId: string): Promise<void> {
-    await this.client().deleteTask(listId, externalId);
+    try {
+      await this.client().deleteTask(listId, externalId);
+    } catch (err) {
+      // Delete is idempotent: a 404 means the task is already gone, which is the
+      // outcome we want. Swallow it so the engine prunes the stale link instead
+      // of retrying the same DELETE on every reconcile pass.
+      if (isGraphNotFound(err)) return;
+      throw err;
+    }
   }
 
   async delta(listId: string, token?: string): Promise<DeltaResult> {

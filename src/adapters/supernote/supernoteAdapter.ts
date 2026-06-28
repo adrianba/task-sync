@@ -12,6 +12,7 @@ import {
   SupernoteConflictError,
   SupernoteCursorExpiredError,
   SupernoteHttpClient,
+  SupernoteNotFoundError,
   type ListTasksOptions,
   type ServiceTask,
   type SupernoteServiceClient,
@@ -144,7 +145,16 @@ export class SupernoteAdapter implements SyncAdapter {
     externalId: string,
     expectedVersion?: string,
   ): Promise<void> {
-    await this.client.deleteTask(externalId, expectedVersionMs(expectedVersion));
+    try {
+      await this.client.deleteTask(externalId, expectedVersionMs(expectedVersion));
+    } catch (err) {
+      // Delete is idempotent: a 404 means the task is already gone on the
+      // service (e.g. deleted on the device), which is the outcome we want.
+      // Swallow it so the engine can prune the stale link instead of retrying
+      // the same DELETE on every reconcile pass.
+      if (err instanceof SupernoteNotFoundError) return;
+      throw err;
+    }
   }
 
   public async delta(listId: string, token?: string): Promise<DeltaResult> {
