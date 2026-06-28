@@ -4,6 +4,7 @@ import type { TokenCacheContext } from "@azure/msal-node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EncryptedTokenCachePlugin } from "../src/adapters/msTodo/tokenCache.js";
 import {
+  embedSyncIdInBody,
   fromGraphTask,
   graphDateToIsoDate,
   importanceToPriority,
@@ -214,8 +215,7 @@ describe("EncryptedTokenCachePlugin", () => {
   });
 });
 
-function fakeCacheContext(serialized: string, changed: boolean): TokenCacheContext {
-  return {
+function fakeCacheContext(serialized: string, changed: boolean): TokenCacheContext {  return {
     cacheHasChanged: changed,
     tokenCache: {
       serialize: vi.fn(() => serialized),
@@ -223,3 +223,46 @@ function fakeCacheContext(serialized: string, changed: boolean): TokenCacheConte
     },
   } as unknown as TokenCacheContext;
 }
+
+describe("sync-id body correlation", () => {
+  it("embeds a marker into an empty body and round-trips via fromGraphTask", () => {
+    const body = embedSyncIdInBody("sid-1");
+    expect(body.content).toBe("<!-- sync-id: sid-1 -->");
+
+    const task = fromGraphTask(
+      { id: "x", title: "T", status: "notStarted", body },
+      "listA",
+    );
+    expect(task.externalSyncId).toBe("sid-1");
+  });
+
+  it("preserves existing user notes when embedding the marker", () => {
+    const body = embedSyncIdInBody("sid-2", "my note");
+    expect(body.content).toContain("my note");
+    expect(body.content).toContain("<!-- sync-id: sid-2 -->");
+  });
+
+  it("replaces a stale marker rather than appending a second one", () => {
+    const body = embedSyncIdInBody("new", "note <!-- sync-id: old -->");
+    expect(body.content).toContain("note");
+    expect(body.content).toContain("<!-- sync-id: new -->");
+    expect(body.content).not.toContain("old");
+  });
+
+  it("leaves externalSyncId unset when the body carries no marker", () => {
+    const task = fromGraphTask(
+      { id: "y", title: "T", status: "notStarted", body: { contentType: "text", content: "plain" } },
+      "listA",
+    );
+    expect(task.externalSyncId).toBeUndefined();
+  });
+
+  it("reads the @odata.etag-derived lastModified without choking on a null body", () => {
+    const task = fromGraphTask(
+      { id: "z", title: "T", status: "notStarted", body: null, lastModifiedDateTime: "2026-01-01T00:00:00Z" },
+      "listA",
+    );
+    expect(task.externalSyncId).toBeUndefined();
+    expect(task.lastModified).toBe("2026-01-01T00:00:00Z");
+  });
+});

@@ -17,30 +17,53 @@ export class FakeAdapter implements SyncAdapter {
   readonly ordered: boolean;
   /** When true, exposes `moveTask` (a native cross-list move). */
   readonly movable: boolean;
+  /**
+   * When true, an outbound `moveTask` mints a NEW external id (emulating
+   * Microsoft To Do, whose move is delete+create) instead of preserving it
+   * (Supernote). Exercises the engine's link re-keying.
+   */
+  readonly rekeyOnMove: boolean;
   private clock = 1;
   private readonly lists = new Map<string, ExternalList>();
   private readonly tasks = new Map<string, ExternalTask>();
+  private readonly removed: { listId: string; id: string }[] = [];
   initCalls = 0;
   closeCalls = 0;
   /** Records every moveTask call, for assertions. */
-  moveCalls: { externalId: string; toListId: string }[] = [];
+  moveCalls: { externalId: string; fromListId: string; toListId: string }[] = [];
 
-  constructor(backend = "fake", ordered = false, movable = false) {
+  constructor(backend = "fake", ordered = false, movable = false, rekeyOnMove = false) {
     this.backend = backend;
     this.ordered = ordered;
     this.movable = movable;
+    this.rekeyOnMove = rekeyOnMove;
     if (movable) {
       // Only expose the optional capability when requested, so the engine's
       // `typeof adapter.moveTask === "function"` capability gate matches a real
       // backend that does (Supernote) or does not (Microsoft To Do) support it.
       this.moveTask = (
         externalId: string,
+        fromListId: string,
         toListId: string,
         _expectedVersion?: string,
       ): Promise<ExternalTask> => {
         const existing = this.tasks.get(externalId);
         if (!existing) throw new Error(`No such task ${externalId}`);
-        this.moveCalls.push({ externalId, toListId });
+        this.moveCalls.push({ externalId, fromListId, toListId });
+        if (this.rekeyOnMove) {
+          // Emulate MS: delete old, create new id in the target list.
+          this.tasks.delete(externalId);
+          this.removed.push({ listId: fromListId, id: externalId });
+          const newId = randomUUID();
+          const moved: ExternalTask = {
+            ...existing,
+            externalId: newId,
+            listId: toListId,
+            lastModified: this.now(),
+          };
+          this.tasks.set(newId, moved);
+          return Promise.resolve(moved);
+        }
         const updated: ExternalTask = { ...existing, listId: toListId, lastModified: this.now() };
         this.tasks.set(externalId, updated);
         return Promise.resolve(updated);
@@ -85,12 +108,15 @@ export class FakeAdapter implements SyncAdapter {
   }
 
   createTask(listId: string, input: ExternalTaskInput): Promise<ExternalTask> {
+    const { syncId, ...rest } = input;
     const task: ExternalTask = {
       externalId: randomUUID(),
       listId,
       lastModified: this.now(),
-      ...input,
+      ...rest,
     };
+    // Emulate a backend that carries our sync-id out-of-band (e.g. MS notes).
+    if (syncId !== undefined) task.externalSyncId = syncId;
     if (this.ordered && task.order === undefined) {
       // Mimic Supernote: omitted order appends at the end of the list.
       task.order = [...this.tasks.values()].filter((t) => t.listId === listId).length;
@@ -106,12 +132,14 @@ export class FakeAdapter implements SyncAdapter {
   ): Promise<ExternalTask> {
     const existing = this.tasks.get(externalId);
     if (!existing) throw new Error(`No such task ${externalId}`);
+    const { syncId, ...rest } = patch;
     const updated: ExternalTask = {
       ...existing,
-      ...patch,
+      ...rest,
       listId,
       lastModified: this.now(),
     };
+    if (syncId !== undefined) updated.externalSyncId = syncId;
     this.tasks.set(externalId, updated);
     return Promise.resolve(updated);
   }
@@ -122,9 +150,14 @@ export class FakeAdapter implements SyncAdapter {
   }
 
   delta(listId: string, _token?: string): Promise<DeltaResult> {
+    const removedIds = this.removed.filter((r) => r.listId === listId).map((r) => r.id);
+    // Drain reported removals so they are delivered once (like a real delta).
+    for (let i = this.removed.length - 1; i >= 0; i--) {
+      if (this.removed[i]?.listId === listId) this.removed.splice(i, 1);
+    }
     return Promise.resolve({
       changed: [...this.tasks.values()].filter((t) => t.listId === listId),
-      removedIds: [],
+      removedIds,
       token: String(this.clock),
     });
   }
@@ -145,12 +178,14 @@ export class FakeAdapter implements SyncAdapter {
       listId = randomUUID();
       this.lists.set(listId, { id: listId, name: listName });
     }
+    const { syncId, ...rest } = input;
     const task: ExternalTask = {
       externalId: randomUUID(),
       listId,
       lastModified: this.now(),
-      ...input,
+      ...rest,
     };
+    if (syncId !== undefined) task.externalSyncId = syncId;
     this.tasks.set(task.externalId, task);
     return task;
   }
@@ -172,6 +207,28 @@ export class FakeAdapter implements SyncAdapter {
     if (!existing) throw new Error(`No such task ${externalId}`);
     const listId = this.listIdByName(toListName);
     this.tasks.set(externalId, { ...existing, listId, lastModified: this.now() });
+  }
+
+  /**
+   * Simulate an MS-style device move: the old task is deleted (and reported via
+   * delta `removedIds`) and a fresh task with a NEW id is created in the target
+   * list, carrying the same `externalSyncId`. Returns the new task.
+   */
+  simulateDeviceMoveRekey(externalId: string, toListName: string): ExternalTask {
+    const existing = this.tasks.get(externalId);
+    if (!existing) throw new Error(`No such task ${externalId}`);
+    this.tasks.delete(externalId);
+    this.removed.push({ listId: existing.listId, id: externalId });
+    const listId = this.listIdByName(toListName);
+    const newId = randomUUID();
+    const moved: ExternalTask = {
+      ...existing,
+      externalId: newId,
+      listId,
+      lastModified: this.now(),
+    };
+    this.tasks.set(newId, moved);
+    return moved;
   }
 
   allTasks(): ExternalTask[] {

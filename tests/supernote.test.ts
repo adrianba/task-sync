@@ -387,7 +387,7 @@ describe("SupernoteAdapter", () => {
     const id = "t".repeat(32);
     client.tasks = [svcTask({ id, list_id: null, last_modified: 50 })];
     const adapter = makeAdapter(client);
-    const moved = await adapter.moveTask!(id, "L".repeat(32), new Date(50).toISOString());
+    const moved = await adapter.moveTask!(id, "", "L".repeat(32), new Date(50).toISOString());
     expect(client.lastUpdate?.body).toEqual({ list_id: "L".repeat(32) });
     expect(client.lastUpdate?.expected).toBe(50);
     expect(moved.listId).toBe("L".repeat(32));
@@ -398,7 +398,7 @@ describe("SupernoteAdapter", () => {
     const id = "t".repeat(32);
     client.tasks = [svcTask({ id, list_id: "L".repeat(32) })];
     const adapter = makeAdapter(client);
-    const moved = await adapter.moveTask!(id, "");
+    const moved = await adapter.moveTask!(id, "L".repeat(32), "");
     expect(client.lastUpdate?.body).toEqual({ list_id: null });
     expect(moved.listId).toBe("");
   });
@@ -409,7 +409,7 @@ describe("SupernoteAdapter", () => {
     client.conflictOnUpdate = true;
     const adapter = makeAdapter(client);
     await expect(
-      adapter.moveTask!("t".repeat(32), "L".repeat(32), new Date(1).toISOString()),
+      adapter.moveTask!("t".repeat(32), "", "L".repeat(32), new Date(1).toISOString()),
     ).rejects.toBeInstanceOf(ExternalConflictError);
   });
 

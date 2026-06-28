@@ -38,6 +38,14 @@ export class GraphDeltaGoneError extends GraphError {
   }
 }
 
+/** HTTP 412 from an `If-Match` conditional write (the stored task changed). */
+export class GraphPreconditionFailedError extends GraphError {
+  constructor(body: string) {
+    super("Microsoft Graph precondition failed (If-Match)", 412, body);
+    this.name = "GraphPreconditionFailedError";
+  }
+}
+
 export class GraphRequestTimeoutError extends Error {
   constructor(
     readonly timeoutMs: number,
@@ -111,18 +119,28 @@ export class GraphClient {
     );
   }
 
-  async patchTask<T>(listId: string, taskId: string, body: unknown): Promise<T> {
+  async patchTask<T>(
+    listId: string,
+    taskId: string,
+    body: unknown,
+    ifMatch?: string,
+  ): Promise<T> {
     return this.request<T>(
       "PATCH",
       `/me/todo/lists/${encodeURIComponent(listId)}/tasks/${encodeURIComponent(taskId)}`,
       body,
+      false,
+      ifMatch,
     );
   }
 
-  async deleteTask(listId: string, taskId: string): Promise<void> {
+  async deleteTask(listId: string, taskId: string, ifMatch?: string): Promise<void> {
     await this.request<void>(
       "DELETE",
       `/me/todo/lists/${encodeURIComponent(listId)}/tasks/${encodeURIComponent(taskId)}`,
+      undefined,
+      false,
+      ifMatch,
     );
   }
 
@@ -191,18 +209,21 @@ export class GraphClient {
     urlOrPath: string,
     body?: unknown,
     deltaRequest = false,
+    ifMatch?: string,
   ): Promise<T> {
     const url = urlOrPath.startsWith("http") ? urlOrPath : `${this.baseUrl}${urlOrPath}`;
 
     for (let attempt = 0; ; attempt += 1) {
       const token = await this.tokenProvider();
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      };
+      if (ifMatch !== undefined) headers["If-Match"] = ifMatch;
       const requestInit: RequestInit = {
         method,
         signal: this.combinedSignal(),
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
+        headers,
       };
       try {
         if (body !== undefined) requestInit.body = JSON.stringify(body);
@@ -229,6 +250,9 @@ export class GraphClient {
           const snippet = text.slice(0, 1_000);
           if (deltaRequest && response.status === 410) {
             throw new GraphDeltaGoneError(snippet);
+          }
+          if (response.status === 412) {
+            throw new GraphPreconditionFailedError(snippet);
           }
           throw new GraphError(
             `Microsoft Graph ${method} failed with HTTP ${response.status}`,

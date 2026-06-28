@@ -1,5 +1,6 @@
 import type { ExternalTask, ExternalTaskInput } from "../types.js";
 import type { IsoDate, TaskPriority, TaskStatus } from "../../model/task.js";
+import { parseSyncIdComment } from "../../vault/syncId.js";
 
 export type GraphStatus =
   | "notStarted"
@@ -14,6 +15,12 @@ export interface GraphDateTimeTimeZone {
   timeZone: "UTC";
 }
 
+/** Microsoft Graph `itemBody` (the task notes field). */
+export interface GraphItemBody {
+  content?: string;
+  contentType?: "text" | "html";
+}
+
 export interface GraphTodoTask {
   id: string;
   title?: string;
@@ -23,6 +30,8 @@ export interface GraphTodoTask {
   startDateTime?: GraphDateTimeTimeZone | null;
   completedDateTime?: GraphDateTimeTimeZone | null;
   lastModifiedDateTime?: string;
+  body?: GraphItemBody | null;
+  "@odata.etag"?: string;
 }
 
 export interface GraphTodoTaskBody {
@@ -32,6 +41,7 @@ export interface GraphTodoTaskBody {
   dueDateTime?: GraphDateTimeTimeZone;
   startDateTime?: GraphDateTimeTimeZone;
   completedDateTime?: GraphDateTimeTimeZone;
+  body?: GraphItemBody;
 }
 
 export function isoDateToGraphDate(date: IsoDate): GraphDateTimeTimeZone {
@@ -137,6 +147,29 @@ export function fromGraphTask(raw: GraphTodoTask, listId: string): ExternalTask 
   if (raw.lastModifiedDateTime !== undefined) {
     task.lastModified = raw.lastModifiedDateTime;
   }
+  const externalSyncId = parseSyncIdComment(raw.body?.content);
+  if (externalSyncId !== undefined) task.externalSyncId = externalSyncId;
 
   return task;
+}
+
+/**
+ * Embed our `sync-id` marker into a Graph task body, preserving any existing
+ * user notes. Microsoft To Do keeps the body across an app "Move to list", so
+ * the marker rides along even though the move mints a new task id — letting the
+ * engine recognise the moved task and re-key its link instead of duplicating.
+ */
+export function embedSyncIdInBody(syncId: string, existing?: string | null): GraphItemBody {
+  const marker = `<!-- sync-id: ${syncId} -->`;
+  const current = existing ?? "";
+  if (current.trim() === "") {
+    return { contentType: "text", content: marker };
+  }
+  if (/<!--\s*sync-id:\s*[A-Za-z0-9._~-]+\s*-->/u.test(current)) {
+    return {
+      contentType: "text",
+      content: current.replace(/<!--\s*sync-id:\s*[A-Za-z0-9._~-]+\s*-->/u, marker),
+    };
+  }
+  return { contentType: "text", content: `${current.replace(/\s+$/u, "")}\n${marker}` };
 }

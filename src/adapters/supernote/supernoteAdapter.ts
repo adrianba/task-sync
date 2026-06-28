@@ -158,12 +158,14 @@ export class SupernoteAdapter implements SyncAdapter {
 
   public async moveTask(
     externalId: string,
+    _fromListId: string,
     toListId: string,
     expectedVersion?: string,
   ): Promise<ExternalTask> {
     // A move is a plain `list_id` re-point on the service: the task id is
-    // preserved and only `last_modified` bumps. Conditional on the last-seen
-    // version so a concurrent device edit surfaces as a deferrable conflict.
+    // preserved and only `last_modified` bumps. `fromListId` is unused (the
+    // service locates the task by id). Conditional on the last-seen version so a
+    // concurrent device edit surfaces as a deferrable conflict.
     try {
       const task = await this.client.updateTask(
         externalId,

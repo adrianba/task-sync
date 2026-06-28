@@ -32,6 +32,15 @@ export interface ExternalTask {
   order?: number;
   /** ISO-8601 timestamp of last modification, used for change detection. */
   lastModified?: string;
+  /**
+   * The service's own correlation id (our `sync-id`) if the backend can carry
+   * one out-of-band (e.g. Microsoft To Do stores it in the task notes/body so it
+   * survives an app-initiated cross-list move, which mints a new `externalId`).
+   * Lets the engine recognise a moved/recreated task as an already-synced one
+   * and re-key its link instead of importing a duplicate. Undefined when the
+   * backend cannot carry it (e.g. Supernote, which preserves `externalId`).
+   */
+  externalSyncId?: string;
 }
 
 /** Fields that can be written when creating/updating an external task. */
@@ -47,6 +56,12 @@ export interface ExternalTaskInput {
    * concept ignore it. On create, omit to append at the end.
    */
   order?: number;
+  /**
+   * Our `sync-id` correlation id for this task, when the backend can persist it
+   * out-of-band (Microsoft To Do embeds it in the task notes/body). Backends
+   * that cannot carry it ignore the field.
+   */
+  syncId?: string;
 }
 
 /** Result of an incremental change pull. */
@@ -98,12 +113,15 @@ export interface SyncAdapter {
 
   listTasks(listId: string): Promise<ExternalTask[]>;
   /**
-   * Look up a task by id. `listId` is the caller's last-known list and is a hint
-   * only: the returned task is the live row regardless of which list it now
-   * belongs to (a task may have been moved between lists on the backend). The
-   * caller MUST inspect `ExternalTask.listId` to learn the current list rather
-   * than assume it equals `listId`. Returns `null` only when the task no longer
-   * exists (genuinely deleted), never merely because it moved lists.
+   * Look up a task by id. `listId` is the caller's last-known list. Backends
+   * that store a task independently of its list (e.g. Supernote) treat it as a
+   * hint and return the live row regardless of which list it now belongs to;
+   * the caller MUST inspect `ExternalTask.listId` for the current list. Backends
+   * whose task ids are scoped to a list (e.g. Microsoft To Do, where a move
+   * mints a new id) look up within `listId` only. Returns `null` when the task
+   * is not found under `listId` (for list-scoped backends this includes "moved
+   * away"; such backends instead carry `externalSyncId` so the engine can
+   * recognise the moved/recreated task and re-key its link).
    */
   getTask(listId: string, externalId: string): Promise<ExternalTask | null>;
   createTask(listId: string, input: ExternalTaskInput): Promise<ExternalTask>;
@@ -128,18 +146,25 @@ export interface SyncAdapter {
   deleteTask(listId: string, externalId: string, expectedVersion?: string): Promise<void>;
 
   /**
-   * Move a task to a different list, preserving its identity (`externalId`).
-   * Optional: only backends that support a cross-list move natively (e.g.
-   * Supernote, which re-points the task's `list_id`) implement it. The engine
-   * capability-gates list-membership reconciliation on its presence; backends
-   * without it (e.g. Microsoft To Do, where a move is a delete+create) leave it
-   * undefined and a vault tag change is a no-op for them.
+   * Move a task from `fromListId` to `toListId`. Optional: only backends that
+   * support a cross-list move implement it; the engine capability-gates
+   * list-membership reconciliation on its presence (backends without it leave a
+   * vault tag change a no-op).
+   *
+   * Identity is NOT guaranteed to be preserved: backends with a native move
+   * (Supernote re-points `list_id`) return the same `externalId`; backends
+   * without one (Microsoft To Do) emulate the move as delete-in-`fromListId` +
+   * create-in-`toListId` and return a task with a **new `externalId`**. Callers
+   * MUST re-key any stored link to the returned task's `externalId`/`listId`.
+   * `fromListId` is required by emulating backends to read+delete the source;
+   * native-move backends may ignore it.
    *
    * `expectedVersion` has the same optimistic-concurrency semantics as
-   * `updateTask`. Returns the updated task (with its new `listId`).
+   * `updateTask`. Returns the moved task (with its new `listId`, possibly new id).
    */
   moveTask?(
     externalId: string,
+    fromListId: string,
     toListId: string,
     expectedVersion?: string,
   ): Promise<ExternalTask>;

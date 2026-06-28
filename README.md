@@ -416,19 +416,31 @@ specially in both directions.
 
 ### Moving a task between lists
 
-A task's **list membership** is kept in sync both ways for backends that support
-a native cross-list move (Supernote does; Microsoft To Do does not, so a vault
-tag change is a no-op there):
+A task's **list membership** is kept in sync both ways. Supernote preserves the
+task id across a move; Microsoft To Do has **no native cross-list move**, so a
+move there is emulated (create the task in the new list, delete it from the old)
+and the task receives a **new id** — handled transparently:
 
 - **In the vault → backend:** retagging a task's block (e.g. moving the line from
   an `#inbox` block to a `#work` block) moves the corresponding backend task to
-  the matching list. The task keeps its identity — no delete-and-recreate.
-- **On the device → vault:** moving a task to another Supernote list relocates
-  its markdown line into the block for that list's tag (an existing block if one
-  exists anywhere in the vault, otherwise a new `#<tag>` block in the **Sync
-  Inbox** note). The line keeps its `sync-id`, so it is **not** duplicated.
+  the matching list. On Supernote the id is preserved; on Microsoft To Do the
+  task is re-created in the new list (new id) and its link is re-keyed — you do
+  **not** get a duplicate.
+- **On the device → vault:** moving a task to another list relocates its markdown
+  line into the block for that list's tag (an existing block if one exists
+  anywhere in the vault, otherwise a new `#<tag>` block in the **Sync Inbox**
+  note). The line keeps its `sync-id`, so it is **not** duplicated. For Microsoft
+  To Do, where an app-side "Move to list" mints a new id, the task is recognised
+  by a `sync-id` marker carried in its **notes/body** and re-correlated rather
+  than imported as a second copy.
 - **Both sides moved** (a conflict) resolves **vault-wins**: the backend task is
   moved to match the vault's tag.
+
+> **Microsoft To Do note:** to support move correlation, task-sync writes a small
+> `<!-- sync-id: … -->` marker into the **Notes** field of each synced To Do
+> task. It is preserved alongside any notes you add. If your To Do client strips
+> notes when moving a task between lists, a move may occasionally produce a
+> duplicate that the next sync reconciles (no data is lost).
 
 A device move to a list whose tag is **not** defined leaves the markdown line
 where it is (the task is out of scope for that list), mirroring how

@@ -123,6 +123,33 @@ engine to a specific provider.
 - Graph **delta tokens** can return `HTTP 410 Gone` → discard and full-resync.
 - MSAL `/common` + device code can fail `AADSTS90133` for some personal
   accounts → auth-code + PKCE fallback.
+- **No native cross-list move; a move mints a NEW task id.** Graph has no
+  move-to-list endpoint, so `MsTodoAdapter.moveTask(externalId, fromListId,
+  toListId, expectedVersion?)` *emulates* one: create a copy in the target list
+  (create-before-delete, so a failure never loses the task) then delete the
+  original. It returns a task with a **new `externalId`**; the engine **re-keys**
+  the link (`reconcileListMembership` persists the returned id). The generic
+  `moveTask` signature carries `fromListId` for exactly this reason (MS needs it
+  to read+delete the source; Supernote ignores it).
+- **Correlation across an app-side move via a sync-id marker in the task body.**
+  Because an app "Move to list" also mints a new id (old id surfaces as delta
+  `@removed`), the adapter embeds `<!-- sync-id: … -->` into the task **notes/
+  body** (`embedSyncIdInBody`, preserving user notes) on create/update/move, and
+  `fromGraphTask` parses it back into `ExternalTask.externalSyncId`. `pullInbound`
+  re-keys the moved task by that sync-id instead of importing a duplicate; the
+  outbound recreate is **deferred** until after this correlation
+  (`MoveContext.pendingRecreate` / `resolvePendingRecreates`) so a moved task is
+  never duplicated, and vault-wins reasserts the vault's list on the next pass.
+  *Assumes the To Do client preserves notes across a move;* if it strips them,
+  correlation degrades to a possible duplicate (no data loss).
+- **`getTask` is list-scoped** (unlike Supernote's list-agnostic lookup): it can
+  only find a task within the given `listId`, so a moved/renamed id reads as
+  `null`. The non-identity move + sync-id-in-body correlation above compensates.
+- **Optimistic concurrency via ETag.** `updateTask`/`deleteTask`/`moveTask` read
+  fresh, compare `lastModifiedDateTime` to the caller's `expectedVersion`
+  (mismatch → `ExternalConflictError`), and send `If-Match: <@odata.etag>` on the
+  PATCH/DELETE; a Graph `412` maps to `ExternalConflictError` (parity with
+  Supernote's `If-Unmodified-Since`/`409`). Deletes are idempotent on `404`.
 
 ### Supernote (supernote-task-service HTTP API)
 - task-sync talks to [`adrianba/supernote-task-service`](https://github.com/adrianba/supernote-task-service)

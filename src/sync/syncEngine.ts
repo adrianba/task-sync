@@ -153,13 +153,39 @@ interface MoveContext {
   /** When false (incremental watcher passes), inbound relocations are skipped. */
   allowInboundRelocation: boolean;
   pending: PendingRelocation[];
+  /**
+   * Outbound recreations deferred until after inbound correlation (full pass
+   * only). When a link's external task is not found during the outbound walk it
+   * may have been *moved* on a backend whose move mints a new id (Microsoft To
+   * Do) rather than genuinely deleted. Recreating immediately would duplicate
+   * the task that {@link pullInbound} is about to re-key by sync-id, so the
+   * decision is deferred until correlation has run.
+   */
+  pendingRecreate: PendingRecreate[];
   listIndexByBackend: Map<string, BackendListIndex>;
+}
+
+/** A deferred outbound recreate (see {@link MoveContext.pendingRecreate}). */
+interface PendingRecreate {
+  task: Task;
+  entry: BackendEntry;
+  syncId: string;
+  backend: string;
+  listId: string;
+  curHash: string;
+  link: ExternalLink;
 }
 
 /** Result of list-membership reconciliation for one (task, backend). */
 interface MoveOutcome {
   /** The list id the field reconcile should use (post outbound move). */
   effectiveListId: string;
+  /**
+   * The external id the field reconcile should use. Differs from the link's
+   * prior id when an outbound move re-keyed the task (e.g. Microsoft To Do,
+   * whose emulated move mints a new id). Undefined when unchanged.
+   */
+  effectiveExternalId?: string;
   /** The freshest external `lastModified` (post outbound move). */
   extLastModified: string | undefined;
   /** True when an inbound relocation was queued for the post-walk phase. */
@@ -195,6 +221,7 @@ function toInput(task: Task): ExternalTaskInput {
   if (task.fields.start !== undefined) input.start = task.fields.start;
   if (task.fields.done !== undefined) input.done = task.fields.done;
   if (task.fields.priority !== undefined) input.priority = task.fields.priority;
+  if (task.syncId !== undefined) input.syncId = task.syncId;
   return input;
 }
 
@@ -268,6 +295,7 @@ export class SyncEngine {
     const moveCtx: MoveContext = {
       allowInboundRelocation: true,
       pending: [],
+      pendingRecreate: [],
       listIndexByBackend: new Map(),
     };
     const filesResult = await this.reconcileFiles(files, false, moveCtx);
@@ -297,6 +325,10 @@ export class SyncEngine {
       }
     }
     result.inboundCreated += await this.pullInbound();
+    // Resolve deferred outbound recreations now that inbound correlation has had
+    // a chance to re-key moved tasks by sync-id (avoids duplicating an app-moved
+    // task whose id changed).
+    await this.resolvePendingRecreates(moveCtx, result);
     // Ordering is a list-global property, so it runs in the full pass (after
     // field reconcile + inbound creation) when the whole vault is available.
     if (!this.options.dryRun) await this.reconcileOrdering(files, result);
@@ -321,6 +353,7 @@ export class SyncEngine {
       // relocations here would need the whole-vault view we don't gather.
       allowInboundRelocation: false,
       pending: [],
+      pendingRecreate: [],
       listIndexByBackend: new Map(),
     });
     if (!this.options.dryRun) await this.store.flush();
@@ -532,9 +565,25 @@ export class SyncEngine {
     const listId = link.externalListId ?? (await entry.adapter.ensureList(listName));
     const ext = await entry.adapter.getTask(listId, link.externalId);
 
-    // External task vanished — recreate it outbound. With a list-agnostic
-    // `getTask`, a null here means a genuine deletion (not a cross-list move).
+    // External task vanished. For a list-agnostic `getTask` (Supernote) a null
+    // here means a genuine deletion. But a backend whose move mints a new id
+    // (Microsoft To Do) also surfaces the old id as gone after an app-side move;
+    // recreating now would duplicate the task that `pullInbound` is about to
+    // re-key by sync-id. In the full pass, defer the recreate until after inbound
+    // correlation; in incremental (outbound-only) passes, recreate immediately.
     if (!ext) {
+      if (moveCtx.allowInboundRelocation) {
+        moveCtx.pendingRecreate.push({
+          task,
+          entry,
+          syncId,
+          backend,
+          listId,
+          curHash,
+          link,
+        });
+        return task;
+      }
       result.createdOutbound++;
       if (this.options.dryRun) return task;
       const recreated = await entry.adapter.createTask(listId, toInput(task));
@@ -617,7 +666,7 @@ export class SyncEngine {
       try {
         updated = await entry.adapter.updateTask(
           effectiveListId,
-          link.externalId,
+          curLink.externalId,
           toInput(task),
           extLastModified,
         );
@@ -718,14 +767,18 @@ export class SyncEngine {
       const desiredListId = await this.resolveDesiredListId(entry, listName, idx);
       if (desiredListId === undefined) return noMove;
       let newExtMod = extLastModified;
+      let newExternalId = link.externalId;
       if (externalCurListId !== desiredListId) {
         try {
           const movedTask = await entry.adapter.moveTask!(
             link.externalId,
+            externalCurListId,
             desiredListId,
             extLastModified,
           );
           newExtMod = movedTask.lastModified ?? extLastModified;
+          // A move may re-key the task (e.g. MS To Do mints a new id); track it.
+          newExternalId = movedTask.externalId;
         } catch (err) {
           if (err instanceof ExternalConflictError) {
             result.conflicts++;
@@ -743,16 +796,19 @@ export class SyncEngine {
           syncId,
           fromListId: externalCurListId,
           toListId: desiredListId,
+          ...(newExternalId !== link.externalId ? { rekeyedTo: newExternalId } : {}),
         });
       }
       await this.persistLink({
         ...link,
+        externalId: newExternalId,
         externalListId: desiredListId,
         ...(newExtMod !== undefined ? { lastExternalModified: newExtMod } : {}),
         lastSyncedAt: new Date().toISOString(),
       });
       return {
         effectiveListId: desiredListId,
+        effectiveExternalId: newExternalId,
         extLastModified: newExtMod,
         deferred: false,
         conflictSkipped: false,
@@ -987,6 +1043,13 @@ export class SyncEngine {
     // tasks are inserted so subsequent tasks for the same tag chain correctly.
     const blockIndex = await this.buildBlockIndex();
 
+    // Map of sync-id → vault file for tasks still present in the vault. Used to
+    // recognise an external task that was moved/recreated on the backend (minting
+    // a new id, e.g. Microsoft To Do) as an already-synced task — re-keying its
+    // link instead of importing a duplicate (vault-wins reassertion then runs on
+    // the next pass via list-membership reconciliation).
+    const vaultSyncIds = await this.collectVaultSyncIds();
+
     for (const entry of this.backends) {
       const backend = entry.adapter.backend;
       try {
@@ -996,6 +1059,13 @@ export class SyncEngine {
           await this.removeLinksForDeletedExternalTasks(backend, fetched.removedIds);
           for (const ext of fetched.changed) {
             if (this.hasLinkForExternal(backend, ext.externalId)) continue;
+            if (
+              ext.externalSyncId !== undefined &&
+              vaultSyncIds.has(ext.externalSyncId)
+            ) {
+              await this.relinkMovedExternal(backend, ext);
+              continue;
+            }
             const didCreate = await this.createInboundTask(
               inboxAbs,
               list.name,
@@ -1066,6 +1136,94 @@ export class SyncEngine {
     return this.store
       .allLinks()
       .some((l) => l.backend === backend && l.externalId === externalId);
+  }
+
+  /**
+   * Collect the sync-ids of all tasks currently present in the vault (in scope,
+   * under a defined-tag block). Used by {@link pullInbound} to recognise an
+   * external task that was moved/recreated on the backend as one we already own.
+   */
+  private async collectVaultSyncIds(): Promise<Set<string>> {
+    const ids = new Set<string>();
+    const files = await this.listMarkdownFiles(this.options.vaultPath);
+    for (const abs of files) {
+      let tasks: Task[];
+      try {
+        tasks = await this.parseFile(abs);
+      } catch {
+        continue;
+      }
+      for (const task of tasks) {
+        if (task.syncId !== undefined) ids.add(task.syncId);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Re-key an existing link to a moved/recreated external task that carries our
+   * sync-id (matched against a still-present vault task). No vault line is
+   * created — the task is already in the vault. The link now points at the new
+   * external id/list; the next list-membership reconcile applies vault-wins,
+   * pulling the task back to the vault tag's list if they differ. Order-safe vs
+   * a same-pass `@removed` for the old id (which targets the old external id).
+   */
+  private async relinkMovedExternal(backend: string, ext: ExternalTask): Promise<void> {
+    const syncId = ext.externalSyncId;
+    if (syncId === undefined) return;
+    const existing = this.store.getLink(syncId, backend);
+    await this.persistLink({
+      ...(existing ?? {}),
+      syncId,
+      backend,
+      externalId: ext.externalId,
+      externalListId: ext.listId,
+      ...(ext.lastModified !== undefined ? { lastExternalModified: ext.lastModified } : {}),
+      lastSyncedAt: new Date().toISOString(),
+    });
+    this.log.info("Re-keyed link for moved external task (vault-wins reassert pending)", {
+      backend,
+      syncId,
+      externalId: ext.externalId,
+      externalListId: ext.listId,
+    });
+  }
+
+  /**
+   * Resolve outbound recreations deferred during the file walk. By now
+   * {@link pullInbound} has run, so if the task was merely *moved* on a backend
+   * that mints a new id its link has been re-keyed by sync-id — in which case we
+   * must NOT recreate (that would duplicate). Only recreate when the link is
+   * still missing or its external task is genuinely gone.
+   */
+  private async resolvePendingRecreates(
+    moveCtx: MoveContext,
+    result: ReconcileResult,
+  ): Promise<void> {
+    for (const p of moveCtx.pendingRecreate) {
+      // A correlated move re-keyed the link; confirm the live task exists before
+      // deciding the original was genuinely deleted.
+      const link = this.store.getLink(p.syncId, p.backend);
+      if (link) {
+        const listId = link.externalListId ?? p.listId;
+        const live = await p.entry.adapter.getTask(listId, link.externalId);
+        if (live) continue; // re-keyed to a live (moved) task — no recreate
+      }
+
+      result.createdOutbound++;
+      if (this.options.dryRun) continue;
+      const recreated = await p.entry.adapter.createTask(p.listId, toInput(p.task));
+      await this.persistLink({
+        ...p.link,
+        externalId: recreated.externalId,
+        externalListId: p.listId,
+        lastKnownHash: p.curHash,
+        ...(recreated.lastModified !== undefined
+          ? { lastExternalModified: recreated.lastModified }
+          : {}),
+        lastSyncedAt: new Date().toISOString(),
+      });
+    }
   }
 
   /**

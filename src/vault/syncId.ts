@@ -24,6 +24,13 @@ export interface ExtractedSyncId {
   rest: string;
 }
 
+/** Read a sync-id from the HTML-comment form only (e.g. embedded in MS notes). */
+export function parseSyncIdComment(text: string | undefined | null): string | undefined {
+  if (!text) return undefined;
+  const m = text.match(SYNC_ID_COMMENT);
+  return m?.[1] ?? undefined;
+}
+
 /** Read a sync-id (comment or Dataview form) and strip it from the text. */
 export function extractSyncId(text: string): ExtractedSyncId {
   let rest = text;
