@@ -289,6 +289,30 @@ describe("SupernoteAdapter", () => {
     ]);
   });
 
+  it("synthesizes an Inbox entry when the service omits it (so inbound polls the inbox)", async () => {
+    const client = new FakeClient();
+    // The real client filters out the null-id inbox, so /v1/lists never yields
+    // it. The adapter must still surface a synthetic Inbox so pullInbound polls
+    // it; otherwise Supernote Inbox tasks are never imported.
+    client.lists = [{ id: "g".repeat(32), title: "Work", last_modified: 1, is_deleted: false }];
+    const adapter = makeAdapter(client);
+    expect(await adapter.listLists()).toEqual([
+      { id: "", name: "Inbox" },
+      { id: "g".repeat(32), name: "Work" },
+    ]);
+  });
+
+  it("does not duplicate the Inbox when the service already returns a null-id inbox", async () => {
+    const client = new FakeClient();
+    client.lists = [
+      { id: null, title: "Inbox", last_modified: 0, is_deleted: false },
+      { id: "g".repeat(32), title: "Work", last_modified: 1, is_deleted: false },
+    ];
+    const adapter = makeAdapter(client);
+    const result = await adapter.listLists();
+    expect(result.filter((l) => l.id === "")).toHaveLength(1);
+  });
+
   it("ensureList short-circuits the inbox and creates others idempotently", async () => {
     const client = new FakeClient();
     const adapter = makeAdapter(client);

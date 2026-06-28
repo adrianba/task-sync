@@ -139,6 +139,12 @@ engine to a specific provider.
   A `410 cursor_expired` mid-sync discards the token and full-resyncs (parity
   with Graph `410 Gone`).
 - **Inbox = `list_id: null`**; the adapter maps it to/from `INBOX_ID` (`""`).
+  The service's `/v1/lists` does **not** include the implicit Inbox (and the
+  client filters null ids), so `SupernoteAdapter.listLists()` injects a synthetic
+  `{ id: INBOX_ID, name: "Inbox" }` entry (de-duped). This is required for
+  **inbound**: `pullInbound` enumerates `listLists()`, so without it tasks
+  created in the Supernote Inbox would never be imported. Importing them still
+  requires `inbox` to be a defined tag (`TASK_SYNC_TODO_TAGS`).
 - **Priority round-trips** via the service's `importance` field (int 1–5/null).
 - **Task order round-trips** via the service's 0-based per-list `sort` field,
   surfaced on the generic `ExternalTask.order` (`adapters/types.ts`); the adapter

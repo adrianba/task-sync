@@ -401,6 +401,19 @@ existing block for that tag anywhere in the vault, or, if none exists, a new
 > **not** imported — otherwise they would be written without a governing tag and
 > immediately deleted again on the next pass.
 
+**Supernote Inbox.** Tasks created in the Supernote **Inbox** (the implicit
+`list_id: null` list) are imported too, but only if `inbox` is a **defined tag**.
+Add it to your tag allow-list, e.g.:
+
+```yaml
+TASK_SYNC_TODO_TAGS: "todo,inbox"
+```
+
+Imported Inbox tasks land under an `#inbox` checklist block (an existing one if
+present, otherwise a new block appended to the **Sync Inbox** note). No
+`SUPERNOTE_TAG_LIST_MAP` entry is needed — the adapter handles the Inbox
+specially in both directions.
+
 ---
 
 ## Conflict resolution

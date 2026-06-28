@@ -126,9 +126,13 @@ export class Service {
     this.inboundTimer = setInterval(() => {
       void this.runSafely(async () => {
         const r = await this.engine!.reconcile();
-        if (r.updatedInbound > 0 || r.inboundCreated > 0) {
-          this.log.info("Periodic reconcile applied inbound changes", { ...r });
-        }
+        // Always log periodic polls so liveness is visible (not silent when
+        // idle). The message distinguishes passes that applied inbound changes.
+        const applied = r.updatedInbound > 0 || r.inboundCreated > 0;
+        this.log.info(
+          applied ? "Periodic reconcile applied inbound changes" : "Periodic reconcile complete",
+          { ...r },
+        );
       });
     }, intervalMs);
     if (typeof this.inboundTimer.unref === "function") this.inboundTimer.unref();

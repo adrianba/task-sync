@@ -88,7 +88,16 @@ export class SupernoteAdapter implements SyncAdapter {
 
   public async listLists(): Promise<ExternalList[]> {
     const lists = await this.client.listLists();
-    return lists.map((list) => ({ id: listIdFromService(list.id), name: list.title }));
+    const mapped = lists.map((list) => ({ id: listIdFromService(list.id), name: list.title }));
+    // The implicit Inbox (`list_id: null`) is not returned by `/v1/lists` (the
+    // client filters null ids), yet inbound enumeration drives off this list —
+    // without it, tasks created in the Supernote Inbox would never be imported.
+    // Always surface a synthetic Inbox entry so `pullInbound` polls it; de-dupe
+    // in case the service ever does return a null-id inbox row.
+    if (!mapped.some((list) => list.id === INBOX_ID)) {
+      mapped.unshift({ id: INBOX_ID, name: INBOX_NAME });
+    }
+    return mapped;
   }
 
   public async ensureList(name: string): Promise<string> {
