@@ -32,6 +32,7 @@ export class MsTodoAdapter implements SyncAdapter {
     private readonly config: MsTodoBackendConfig,
     private readonly tokenKey: Buffer,
     private readonly log: Logger = defaultLogger,
+    private readonly signal?: AbortSignal,
   ) {}
 
   async init(): Promise<void> {
@@ -117,7 +118,11 @@ export class MsTodoAdapter implements SyncAdapter {
   private client(): GraphClient {
     if (!this.graph) {
       this.auth = new MsAuth(this.config, this.tokenKey, this.log);
-      this.graph = new GraphClient(() => this.auth?.getAccessToken() ?? Promise.reject(new Error("Microsoft auth unavailable")), this.log);
+      this.graph = new GraphClient(
+        () => this.auth?.getAccessToken() ?? Promise.reject(new Error("Microsoft auth unavailable")),
+        this.log,
+        this.signal ? { signal: this.signal } : {},
+      );
     }
     return this.graph;
   }
@@ -127,8 +132,9 @@ export function createMsTodoAdapter(
   cfg: MsTodoBackendConfig,
   tokenKey: Buffer,
   log: Logger = defaultLogger,
+  signal?: AbortSignal,
 ): MsTodoAdapter {
-  return new MsTodoAdapter(cfg, tokenKey, log);
+  return new MsTodoAdapter(cfg, tokenKey, log, signal);
 }
 
 function isGraphNotFound(err: unknown): boolean {

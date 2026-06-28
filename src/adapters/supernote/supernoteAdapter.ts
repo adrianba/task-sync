@@ -52,6 +52,7 @@ export class SupernoteAdapter implements SyncAdapter {
     cfg: SupernoteBackendConfig,
     private readonly log: Logger,
     client?: SupernoteServiceClient,
+    signal?: AbortSignal,
   ) {
     this.baseUrl = cfg.service.baseUrl;
     this.client =
@@ -60,7 +61,10 @@ export class SupernoteAdapter implements SyncAdapter {
         cfg.service.baseUrl,
         cfg.service.apiKey,
         log.child({ backend: "supernote" }),
-        { requestTimeoutMs: cfg.service.requestTimeoutMs },
+        {
+          requestTimeoutMs: cfg.service.requestTimeoutMs,
+          ...(signal ? { signal } : {}),
+        },
       );
   }
 
@@ -224,6 +228,7 @@ export class SupernoteAdapter implements SyncAdapter {
 export function createSupernoteAdapter(
   cfg: SupernoteBackendConfig,
   log: Logger,
+  signal?: AbortSignal,
 ): SupernoteAdapter {
-  return new SupernoteAdapter(cfg, log);
+  return new SupernoteAdapter(cfg, log, undefined, signal);
 }

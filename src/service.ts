@@ -31,6 +31,8 @@ export class Service {
   private watcher?: VaultWatcher;
   private health?: HealthServer;
   private inboundTimer: NodeJS.Timeout | undefined;
+  /** Aborts in-flight backend requests and retry back-off sleeps on shutdown. */
+  private readonly shutdown = new AbortController();
   private ready = false;
   private healthy = true;
   private running = false;
@@ -60,7 +62,7 @@ export class Service {
     await mkdir(dirname(this.config.statePath), { recursive: true });
     await this.store.load();
 
-    this.registry = BackendRegistry.fromConfig(this.config, this.log);
+    this.registry = BackendRegistry.fromConfig(this.config, this.log, this.shutdown.signal);
     await this.registry.initAll(this.log);
 
     // The watcher is created early (but not started) so the engine can use its
@@ -187,6 +189,9 @@ export class Service {
   private async stopOnce(): Promise<void> {
     this.stopping = true;
     this.ready = false;
+    // Abort in-flight backend HTTP requests and any retry back-off sleeps so the
+    // active pass unwinds promptly instead of blocking shutdown on a long retry.
+    this.shutdown.abort();
     await this.drainActivePass();
     if (this.inboundTimer) clearInterval(this.inboundTimer);
     this.inboundTimer = undefined;

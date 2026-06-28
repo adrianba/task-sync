@@ -7,6 +7,7 @@ import {
   SupernoteCursorExpiredError,
   SupernoteHttpClient,
   SupernoteNotFoundError,
+  SupernoteServiceError,
   type ListTasksOptions,
   type ServiceTask,
   type ServiceTaskCreate,
@@ -407,5 +408,42 @@ describe("SupernoteHttpClient errors", () => {
       fetch: fakeFetch(404, JSON.stringify({ detail: "Task not found.", code: "not_found" })),
     });
     expect(await client.getTask("a".repeat(32))).toBeNull();
+  });
+
+  it("keeps response bodies out of error messages", async () => {
+    const client = new SupernoteHttpClient("https://svc.example", "key", logger, {
+      fetch: fakeFetch(500, JSON.stringify({ code: "boom", token: "SUPER_SECRET" })),
+      maxRetries: 0,
+    });
+    try {
+      await client.ensureList("Work");
+      throw new Error("expected ensureList to throw");
+    } catch (err) {
+      const e = err as SupernoteServiceError;
+      expect(e.message).not.toContain("SUPER_SECRET");
+      expect(e.body).toContain("SUPER_SECRET");
+    }
+  });
+
+  it("stops retrying once the shutdown signal is aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const fetchFn: typeof fetch = (_input, init) => {
+      calls += 1;
+      if (init?.signal?.aborted) {
+        return Promise.reject(
+          Object.assign(new Error("aborted"), { name: "AbortError" }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 503 }));
+    };
+    const client = new SupernoteHttpClient("https://svc.example", "key", logger, {
+      fetch: fetchFn,
+      maxRetries: 5,
+      signal: controller.signal,
+    });
+    await expect(client.listLists()).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toBe(1);
   });
 });

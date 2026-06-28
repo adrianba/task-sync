@@ -26,8 +26,14 @@ export class BackendRegistry {
     }
   }
 
-  /** Build the registry from validated config. Does not perform I/O. */
-  static fromConfig(config: Config, logger: Logger): BackendRegistry {
+  /**
+   * Build the registry from validated config. Does not perform I/O.
+   *
+   * @param signal optional shutdown signal threaded into each backend's HTTP
+   *   client so in-flight requests and retry back-off sleeps abort promptly on
+   *   graceful shutdown.
+   */
+  static fromConfig(config: Config, logger: Logger, signal?: AbortSignal): BackendRegistry {
     const entries: BackendEntry[] = [];
 
     const ms = config.backends.msTodo;
@@ -37,7 +43,7 @@ export class BackendRegistry {
       }
       const key = parseKey(config.tokenKey);
       entries.push({
-        adapter: createMsTodoAdapter(ms, key, logger.child({ backend: "ms-todo" })),
+        adapter: createMsTodoAdapter(ms, key, logger.child({ backend: "ms-todo" }), signal),
         conflictPolicy: ms.conflictPolicy,
         tagListMap: ms.tagListMap,
       });
@@ -46,7 +52,7 @@ export class BackendRegistry {
     const sn = config.backends.supernote;
     if (sn?.enabled) {
       entries.push({
-        adapter: createSupernoteAdapter(sn, logger.child({ backend: "supernote" })),
+        adapter: createSupernoteAdapter(sn, logger.child({ backend: "supernote" }), signal),
         conflictPolicy: sn.conflictPolicy,
         tagListMap: sn.tagListMap,
       });

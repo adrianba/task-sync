@@ -72,4 +72,27 @@ describe("GraphClient", () => {
       /^Microsoft Graph GET failed with HTTP 400$/,
     );
   });
+
+  it("stops retrying once the shutdown signal is aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const fakeFetch = vi.fn<typeof fetch>((_input, init) => {
+      calls += 1;
+      if (init?.signal?.aborted) {
+        return Promise.reject(
+          Object.assign(new Error("aborted"), { name: "AbortError" }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 503 }));
+    });
+    const client = new GraphClient(() => Promise.resolve("token"), undefined, {
+      fetch: fakeFetch,
+      maxRetries: 5,
+      signal: controller.signal,
+    });
+
+    await expect(client.listLists()).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toBe(1);
+  });
 });
