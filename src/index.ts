@@ -90,7 +90,7 @@ async function main(): Promise<void> {
     ...(args.dryRun ? { overrides: { dryRun: true } } : {}),
   });
 
-  const service = new Service(config, { once: args.once, dryRun: args.dryRun });
+  const service = new Service(config, { once: args.once, dryRun: config.dryRun });
 
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
