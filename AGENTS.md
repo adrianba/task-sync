@@ -123,6 +123,15 @@ engine to a specific provider.
 - Graph **delta tokens** can return `HTTP 410 Gone` → discard and full-resync.
 - MSAL `/common` + device code can fail `AADSTS90133` for some personal
   accounts → auth-code + PKCE fallback.
+- **The default list is the Inbox.** Every account has a built-in list marked
+  `wellknownListName: "defaultList"` that is unrenamable and whose `displayName`
+  ("Tasks") is localized server-side. `MsTodoAdapter` resolves it by that marker
+  (cached `defaultListId()`), surfaces it via `listLists()` under the stable name
+  `INBOX_NAME = "Inbox"` (keeping its real id), and short-circuits
+  `ensureList("inbox"|"Inbox") → defaultListId()` (never creating). This makes the
+  `inbox` tag round-trip to the default list in both directions — the MS analogue
+  of Supernote's `INBOX_ID = ""` / `list_id: null`. Requires `inbox` in
+  `TASK_SYNC_TODO_TAGS`. (A custom list literally named "Inbox" would collide.)
 - **No native cross-list move; a move mints a NEW task id.** Graph has no
   move-to-list endpoint, so `MsTodoAdapter.moveTask(externalId, fromListId,
   toListId, expectedVersion?)` *emulates* one: create a copy in the target list

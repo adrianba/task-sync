@@ -23,6 +23,21 @@ interface RemovedGraphTask extends GraphTodoTask {
   "@removed"?: unknown;
 }
 
+/**
+ * Graph marks the account's built-in default list with this `wellknownListName`.
+ * That list is unrenamable and its `displayName` is localized server-side
+ * ("Tasks" in English), so we resolve it by this stable marker instead of by
+ * name and surface it under {@link INBOX_NAME}.
+ */
+const DEFAULT_LIST_WELLKNOWN = "defaultList";
+
+/**
+ * Stable, locale-independent name under which the default list is exposed, so
+ * the engine's `inbox` tag routes to it in both directions. This is the MS
+ * analogue of Supernote's `INBOX_ID = ""` sentinel.
+ */
+const INBOX_NAME = "Inbox";
+
 export class DeltaTokenExpiredError extends Error {
   constructor(message = "Microsoft To Do delta token expired") {
     super(message);
@@ -34,6 +49,8 @@ export class MsTodoAdapter implements SyncAdapter {
   readonly backend = "ms-todo";
   private auth: MsAuth | undefined;
   private graph: GraphClient | undefined;
+  /** Cached id of the account's default ("Inbox") list (stable per account). */
+  private cachedDefaultListId: string | undefined;
 
   constructor(
     private readonly config: MsTodoBackendConfig,
@@ -53,10 +70,40 @@ export class MsTodoAdapter implements SyncAdapter {
 
   async listLists(): Promise<ExternalList[]> {
     const lists = await this.client().listLists();
-    return lists.map((list) => ({ id: list.id, name: list.displayName }));
+    return lists.map((list) => {
+      if (list.wellknownListName === DEFAULT_LIST_WELLKNOWN) {
+        this.cachedDefaultListId = list.id;
+        // Surface the default list under a stable, locale-independent name so the
+        // `inbox` tag round-trips to it (its real `displayName` is localized).
+        return { id: list.id, name: INBOX_NAME };
+      }
+      return { id: list.id, name: list.displayName };
+    });
+  }
+
+  /**
+   * Resolve (and cache) the id of the account's default list. It is the Inbox
+   * sentinel: the `inbox` tag maps to it and inbound tasks in it land under
+   * `#inbox` — mirroring Supernote's null-id Inbox.
+   */
+  private async defaultListId(): Promise<string> {
+    if (this.cachedDefaultListId !== undefined) return this.cachedDefaultListId;
+    const lists = await this.client().listLists();
+    const def = lists.find((list) => list.wellknownListName === DEFAULT_LIST_WELLKNOWN);
+    if (!def?.id) {
+      throw new Error("Microsoft To Do returned no default list (wellknownListName 'defaultList')");
+    }
+    this.cachedDefaultListId = def.id;
+    return def.id;
   }
 
   async ensureList(name: string): Promise<string> {
+    // The `inbox` tag (and the literal "Inbox") always resolve to the unrenamable
+    // default list; never create a list for it.
+    if (name.trim().toLowerCase() === INBOX_NAME.toLowerCase()) {
+      return this.defaultListId();
+    }
+
     const lists = await this.listLists();
     const existing = lists.find((list) => list.name === name);
     if (existing) return existing.id;

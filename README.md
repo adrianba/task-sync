@@ -414,6 +414,24 @@ present, otherwise a new block appended to the **Sync Inbox** note). No
 `SUPERNOTE_TAG_LIST_MAP` entry is needed — the adapter handles the Inbox
 specially in both directions.
 
+**Microsoft To Do Inbox.** Microsoft To Do has an equivalent: every account has
+a built-in **default list** (shown as "Tasks" in English). It cannot be renamed
+and its name is **localized** by the account language, so task-sync resolves it
+by its well-known marker rather than by name and treats it as the **Inbox** —
+the direct analogue of Supernote's `list_id: null`. As with Supernote, just add
+`inbox` to your tag allow-list:
+
+```yaml
+TASK_SYNC_TODO_TAGS: "todo,inbox"
+```
+
+- Tasks under an `#inbox` block sync to the To Do default list (no
+  `MS_TAG_LIST_MAP` entry needed — do **not** map `inbox` to "Tasks").
+- Tasks created in the To Do default list are imported under an `#inbox` block.
+
+> **Limitation:** don't create a *custom* To Do (or Supernote) list literally
+> named "Inbox" — it collides with the synthetic Inbox name.
+
 ### Moving a task between lists
 
 A task's **list membership** is kept in sync both ways. Supernote preserves the
