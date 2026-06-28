@@ -18,7 +18,13 @@ export class StateStore {
 
   constructor(private readonly path: string) {}
 
-  /** Load from disk; tolerate a missing file (start empty). Throw on corrupt JSON. */
+  /**
+   * Load from disk; tolerate a missing file (start empty). On corrupt content we
+   * deliberately fail fast (throw) rather than starting from an empty state: a
+   * silent reset would drop every `(syncId, backend)` link and cause the next
+   * reconcile to re-create duplicate tasks in every backend. The thrown error
+   * tells the operator to inspect/repair or move aside the file manually.
+   */
   async load(): Promise<void> {
     let raw: string;
     try {
@@ -36,7 +42,12 @@ export class StateStore {
     try {
       parsed = JSON.parse(raw);
     } catch (err) {
-      throw new Error(`State store at ${this.path} contains corrupt JSON`, { cause: err });
+      throw new Error(
+        `State store at ${this.path} contains corrupt JSON and cannot be loaded. ` +
+          "Refusing to start to avoid re-creating duplicate backend tasks from an empty state. " +
+          "Inspect and repair the file, or move it aside to intentionally re-sync from scratch.",
+        { cause: err },
+      );
     }
 
     this.data = parseStateStoreData(parsed, this.path);
@@ -213,7 +224,11 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 }
 
 function invalidState(statePath: string): Error {
-  return new Error(`State store at ${statePath} has an invalid shape`);
+  return new Error(
+    `State store at ${statePath} has an invalid shape and cannot be loaded. ` +
+      "Refusing to start to avoid re-creating duplicate backend tasks from an empty state. " +
+      "Inspect and repair the file, or move it aside to intentionally re-sync from scratch.",
+  );
 }
 
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {

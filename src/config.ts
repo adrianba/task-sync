@@ -74,6 +74,12 @@ const configSchema = z.object({
     .transform((arr) => arr.map((t) => t.trim().replace(/^#/, "").toLowerCase()).filter((t) => t !== ""))
     .refine((arr) => arr.length > 0, "tags must contain at least one non-empty tag"),
   watchDebounceMs: z.number().int().positive().default(300),
+  /**
+   * How often (ms) to poll backends for inbound changes (delta/listing). The
+   * vault is watched in real time; this only governs the pull direction. Default
+   * 60s; exposed for future tuning via `TASK_SYNC_INBOUND_INTERVAL_MS`.
+   */
+  inboundIntervalMs: z.number().int().positive().default(60_000),
   inboundInboxFile: z.string().default("Sync Inbox.md"),
   dryRun: z.boolean().default(false),
   /** AES-256-GCM key (base64/hex, 32 bytes) for the token cache. */
@@ -161,6 +167,13 @@ function fromEnv(): Record<string, unknown> {
       .map((s) => s.trim().replace(/^#/, ""))
       .filter(Boolean);
   if (env.TASK_SYNC_INBOX_FILE) out.inboundInboxFile = env.TASK_SYNC_INBOX_FILE;
+  if (env.TASK_SYNC_INBOUND_INTERVAL_MS) {
+    const n = Number(env.TASK_SYNC_INBOUND_INTERVAL_MS);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new Error("TASK_SYNC_INBOUND_INTERVAL_MS must be a positive integer (milliseconds)");
+    }
+    out.inboundIntervalMs = n;
+  }
   if (env.TASK_SYNC_LOG_LEVEL)
     out.log = { level: env.TASK_SYNC_LOG_LEVEL as LogLevel };
   if (env.TASK_SYNC_TOKEN_KEY) out.tokenKey = env.TASK_SYNC_TOKEN_KEY;

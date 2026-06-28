@@ -1,7 +1,9 @@
 /**
  * Atomic file writes: write to a temp file in the same directory, fsync, then
  * rename over the target. Rename is atomic on POSIX, so readers never observe a
- * partially-written file and a crash mid-write cannot corrupt the target.
+ * partially-written file and a crash mid-write cannot corrupt the target. The
+ * parent directory is fsync'd after the rename so the new directory entry is
+ * durable even if the host loses power immediately afterwards.
  */
 import { open, rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -38,6 +40,22 @@ export async function atomicWriteFile(
     // Best-effort cleanup of the temp file on failure.
     await safeUnlink(tmpPath);
     throw err;
+  }
+
+  // Persist the directory entry created by rename. Best-effort: not all
+  // platforms/filesystems support directory fsync, so failures are ignored.
+  await fsyncDir(dir);
+}
+
+async function fsyncDir(dir: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(dir, "r");
+    await handle.sync();
+  } catch {
+    // Directory fsync is unsupported on some platforms (e.g. Windows); ignore.
+  } finally {
+    await handle?.close();
   }
 }
 

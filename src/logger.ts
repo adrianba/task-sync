@@ -43,6 +43,11 @@ function redact(value: unknown, seen: WeakSet<object>): unknown {
 
 function serializeError(err: unknown): unknown {
   if (err instanceof Error) {
+    // NOTE: `message` and `stack` are emitted verbatim and are NOT value-scrubbed
+    // (key-name redaction below only inspects field names). Callers must never
+    // interpolate secrets or raw upstream response bodies into error messages —
+    // the HTTP clients deliberately keep response bodies off the message and only
+    // on a typed `.body` field, which we do not log here.
     return {
       name: err.name,
       message: err.message,

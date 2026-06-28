@@ -4,7 +4,6 @@ import {
   generateKeyBase64,
   encryptString,
   decryptString,
-  safeEqual,
 } from "../src/util/crypto.js";
 
 describe("util/crypto", () => {
@@ -43,11 +42,5 @@ describe("util/crypto", () => {
     const hex = parseKey(b64).toString("hex");
     expect(parseKey(hex)).toHaveLength(32);
     expect(() => parseKey("tooshort")).toThrow();
-  });
-
-  it("safeEqual compares strings in constant time semantics", () => {
-    expect(safeEqual("abc", "abc")).toBe(true);
-    expect(safeEqual("abc", "abd")).toBe(false);
-    expect(safeEqual("abc", "abcd")).toBe(false);
   });
 });

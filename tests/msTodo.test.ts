@@ -208,7 +208,9 @@ describe("EncryptedTokenCachePlugin", () => {
     expect(errorLog).toHaveBeenCalled();
     const [message, fields] = errorLog.mock.calls[0] ?? [];
     expect(message).toBe("Failed to decrypt MSAL token cache; starting fresh");
-    expect(fields?.err).toBeInstanceOf(Error);
+    // The raw error is deliberately not logged (it can carry paths/crypto
+    // internals); only a generic message is emitted.
+    expect(fields).toBeUndefined();
   });
 });
 

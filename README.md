@@ -234,6 +234,7 @@ shape.
 | `tags` | `TASK_SYNC_TODO_TAGS` | `todo` | Defined tags that mark a checklist block as synced tasks (comma-separated env; leading `#` optional). |
 | `inboundInboxFile` | `TASK_SYNC_INBOX_FILE` | `Sync Inbox.md` | Note that receives externally-created tasks. |
 | `watchDebounceMs` | — | `300` | Debounce window for file changes. |
+| `inboundIntervalMs` | `TASK_SYNC_INBOUND_INTERVAL_MS` | `60000` | How often (ms) to poll backends for inbound changes. The vault is watched in real time; this only governs the pull direction. |
 | `dryRun` | `TASK_SYNC_DRY_RUN` | `false` | Observe-only. |
 | `tokenKey` | `TASK_SYNC_TOKEN_KEY` | — | AES-256-GCM key (32 bytes, base64 or hex). Required when Microsoft To Do is enabled. |
 | `log.level` | `TASK_SYNC_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |

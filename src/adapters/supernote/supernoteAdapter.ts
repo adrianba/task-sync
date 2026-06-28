@@ -26,6 +26,9 @@ import {
 
 const INBOX_NAME = "Inbox";
 
+/** Hard cap on pages followed in one task-pagination loop (cursor-cycle guard). */
+const MAX_TASK_PAGES = 10_000;
+
 /** Parse an ISO `lastModified` string into a millisecond version, if valid. */
 function expectedVersionMs(expectedVersion: string | undefined): number | undefined {
   if (expectedVersion === undefined) return undefined;
@@ -195,16 +198,24 @@ export class SupernoteAdapter implements SyncAdapter {
     const byId = new Map<string, ServiceTask>();
     let since = sinceMs;
     let cursor = sinceMs ?? 0;
-    for (;;) {
-      const page = await this.client.listTasks({
+    for (let page = 0; ; page++) {
+      if (page >= MAX_TASK_PAGES) {
+        throw new Error(`Supernote task pagination exceeded ${MAX_TASK_PAGES} pages (cursor not advancing)`);
+      }
+      const pageResult = await this.client.listTasks({
         ...listFilter(listId),
         ...(since !== undefined ? { since } : {}),
         includeCompleted: true,
       });
-      for (const task of page.tasks) byId.set(task.id, task);
-      cursor = page.cursor;
-      if (!page.has_more) break;
-      since = page.cursor;
+      for (const task of pageResult.tasks) byId.set(task.id, task);
+      cursor = pageResult.cursor;
+      if (!pageResult.has_more) break;
+      // The cursor must strictly advance past the current lower bound, else the
+      // loop would spin forever on a buggy/looping service response.
+      if (since !== undefined && pageResult.cursor <= since) {
+        throw new Error("Supernote task pagination cursor did not advance");
+      }
+      since = pageResult.cursor;
     }
     return { byId, cursor };
   }

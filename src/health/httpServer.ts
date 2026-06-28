@@ -24,25 +24,29 @@ export interface HealthServerOptions {
 
 export class HealthServer {
   private server: Server | undefined;
+  private starting: Promise<void> | undefined;
 
   constructor(private readonly options: HealthServerOptions) {}
 
   start(): Promise<void> {
+    // Idempotent: repeated calls return the same in-flight/settled start promise
+    // rather than binding a second listener.
+    if (this.starting) return this.starting;
     const { host, port, isReady, isHealthy, details, logger } = this.options;
-    return new Promise((resolve, reject) => {
+    this.starting = new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
-        const url = req.url ?? "/";
+        const path = requestPath(req.url);
         if (req.method !== "GET") {
           res.writeHead(405).end();
           return;
         }
-        if (url.startsWith("/healthz")) {
+        if (path === "/healthz") {
           const healthy = isHealthy();
           if (!healthy && details) logger.warn("Health check failed", details());
           respond(res, healthy, { status: healthy ? "ok" : "unhealthy" });
           return;
         }
-        if (url.startsWith("/readyz")) {
+        if (path === "/readyz") {
           const ready = isReady();
           if (!ready && details) logger.warn("Readiness check failed", details());
           respond(res, ready, {
@@ -65,14 +69,23 @@ export class HealthServer {
 
       this.server = server;
     });
+    return this.starting;
   }
 
   async stop(): Promise<void> {
     const server = this.server;
+    this.starting = undefined;
     if (!server) return;
     await new Promise<void>((resolve) => server.close(() => resolve()));
     this.server = undefined;
   }
+}
+
+/** Extract the URL path (ignoring query string) for exact-match routing. */
+function requestPath(rawUrl: string | undefined): string {
+  const url = rawUrl ?? "/";
+  const q = url.indexOf("?");
+  return q === -1 ? url : url.slice(0, q);
 }
 
 function respond(

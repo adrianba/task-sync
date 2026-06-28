@@ -98,6 +98,12 @@ const PRIORITY_DATAVIEW = dataviewField(
 const TAG_FROM_END = /(?:^|\s)(#[^ !@#$%^&*(),.?":{}|<>]+)\s*$/u;
 const BLOCK_REF = /\s+(\^[a-zA-Z0-9-]+)\s*$/u;
 
+// ReDoS note: a few field regexes above (e.g. TASK_LINE's `[\s\t>]* +`, the
+// recurrence/repeat patterns' lazy `+?` followed by `\s*$`) contain overlapping
+// quantifiers. Worst-case backtracking is polynomial, not exponential, and all
+// of these only ever run against a single task line (bounded length), so the
+// practical CPU exposure is negligible. Kept as-is intentionally.
+
 export function statusCharToStatus(ch: string): TaskStatus {
   switch (ch) {
     case "x":

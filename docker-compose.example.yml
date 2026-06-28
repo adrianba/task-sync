@@ -36,6 +36,10 @@ services:
       TASK_SYNC_STATE_PATH: /data/state.json
       TASK_SYNC_LOG_LEVEL: ${TASK_SYNC_LOG_LEVEL:-info}
 
+      # How often (ms) to poll backends for inbound changes. The vault is watched
+      # in real time; this only governs the pull direction. Default: 60000.
+      # TASK_SYNC_INBOUND_INTERVAL_MS: ${TASK_SYNC_INBOUND_INTERVAL_MS:-60000}
+
       # Defined tags (comma-separated, leading '#' optional) that mark a
       # checklist block as synced tasks. A defined tag on the line above a
       # checklist routes those items to a list named after the tag path

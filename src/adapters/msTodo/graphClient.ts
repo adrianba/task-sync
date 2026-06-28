@@ -52,13 +52,25 @@ export interface GraphClientOptions {
   requestTimeoutMs?: number;
   maxRetries?: number;
   fetch?: typeof fetch;
+  /** Aborts in-flight requests and retry back-off sleeps (e.g. on shutdown). */
+  signal?: AbortSignal;
 }
+
+/** Upper bound for any single retry back-off, including server `Retry-After`. */
+const MAX_BACKOFF_MS = 60_000;
+
+/**
+ * Hard cap on pages followed in a single pagination/delta loop. Bounds memory
+ * and guards against a server that returns an ever-`nextLink`ed response.
+ */
+const MAX_PAGES = 10_000;
 
 export class GraphClient {
   private readonly baseUrl = "https://graph.microsoft.com/v1.0";
   private readonly requestTimeoutMs: number;
   private readonly maxRetries: number;
   private readonly fetchFn: typeof fetch;
+  private readonly signal: AbortSignal | undefined;
 
   constructor(
     private readonly tokenProvider: TokenProvider,
@@ -68,6 +80,7 @@ export class GraphClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
     this.maxRetries = options.maxRetries ?? 5;
     this.fetchFn = options.fetch ?? fetch;
+    this.signal = options.signal;
   }
 
   async listLists(): Promise<GraphList[]> {
@@ -121,11 +134,21 @@ export class GraphClient {
     let url = token ?? `/me/todo/lists/${encodeURIComponent(listId)}/tasks/delta`;
     let deltaLink: string | undefined;
 
-    for (;;) {
+    for (let page = 0; ; page++) {
+      if (page >= MAX_PAGES) {
+        throw new GraphError(
+          `Microsoft Graph delta exceeded ${MAX_PAGES} pages (possible nextLink cycle)`,
+          0,
+          "",
+        );
+      }
       const response = await this.request<GraphCollection<T>>("GET", url, undefined, true);
       changed.push(...response.value);
       const nextLink = response["@odata.nextLink"];
       if (nextLink) {
+        if (nextLink === url) {
+          throw new GraphError("Microsoft Graph delta returned a non-advancing nextLink", 0, "");
+        }
         url = nextLink;
         continue;
       }
@@ -141,13 +164,24 @@ export class GraphClient {
   private async collectPages<T>(initialUrl: string): Promise<T[]> {
     const items: T[] = [];
     let url: string | undefined = initialUrl;
-    while (url) {
+    for (let page = 0; url; page++) {
+      if (page >= MAX_PAGES) {
+        throw new GraphError(
+          `Microsoft Graph paging exceeded ${MAX_PAGES} pages (possible nextLink cycle)`,
+          0,
+          "",
+        );
+      }
       const response: GraphCollection<T> = await this.request<GraphCollection<T>>(
         "GET",
         url,
       );
       items.push(...response.value);
-      url = response["@odata.nextLink"];
+      const nextLink = response["@odata.nextLink"];
+      if (nextLink === url) {
+        throw new GraphError("Microsoft Graph paging returned a non-advancing nextLink", 0, "");
+      }
+      url = nextLink;
     }
     return items;
   }
@@ -164,7 +198,7 @@ export class GraphClient {
       const token = await this.tokenProvider();
       const requestInit: RequestInit = {
         method,
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
+        signal: this.combinedSignal(),
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
@@ -181,7 +215,7 @@ export class GraphClient {
             waitMs,
             attempt: attempt + 1,
           });
-          await sleep(waitMs);
+          await sleep(waitMs, this.signal);
           continue;
         }
 
@@ -189,12 +223,15 @@ export class GraphClient {
 
         const text = await response.text();
         if (!response.ok) {
+          // Keep the raw body on the typed error for programmatic handling, but
+          // never interpolate it into the human-readable message — error bodies
+          // can carry sensitive payloads that would then leak into logs.
           const snippet = text.slice(0, 1_000);
           if (deltaRequest && response.status === 410) {
             throw new GraphDeltaGoneError(snippet);
           }
           throw new GraphError(
-            `Microsoft Graph ${method} failed with HTTP ${response.status}: ${snippet}`,
+            `Microsoft Graph ${method} failed with HTTP ${response.status}`,
             response.status,
             snippet,
           );
@@ -203,6 +240,8 @@ export class GraphClient {
         return text ? (JSON.parse(text) as T) : (undefined as T);
       } catch (err) {
         if (!isAbortError(err)) throw err;
+        // A caller-supplied shutdown signal must stop retrying immediately.
+        if (this.signal?.aborted) throw err;
         const timeoutError = new GraphRequestTimeoutError(this.requestTimeoutMs, {
           cause: err,
         });
@@ -213,9 +252,15 @@ export class GraphClient {
           attempt: attempt + 1,
           timeoutMs: this.requestTimeoutMs,
         });
-        await sleep(waitMs);
+        await sleep(waitMs, this.signal);
       }
     }
+  }
+
+  /** Per-request timeout, combined with any caller shutdown signal. */
+  private combinedSignal(): AbortSignal {
+    const timeout = AbortSignal.timeout(this.requestTimeoutMs);
+    return this.signal ? AbortSignal.any([timeout, this.signal]) : timeout;
   }
 }
 
@@ -227,11 +272,16 @@ function retryDelayMs(response: Response | undefined, attempt: number): number {
   const retryAfter = response?.headers.get("Retry-After");
   if (retryAfter) {
     const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds)) return Math.max(seconds, 0) * 1_000;
+    if (Number.isFinite(seconds)) return clampBackoff(Math.max(seconds, 0) * 1_000);
     const retryAt = Date.parse(retryAfter);
-    if (Number.isFinite(retryAt)) return Math.max(retryAt - Date.now(), 0);
+    if (Number.isFinite(retryAt)) return clampBackoff(Math.max(retryAt - Date.now(), 0));
   }
   return Math.min(2 ** attempt * 500, 30_000);
+}
+
+/** Clamp a back-off (including server-provided `Retry-After`) to a sane bound. */
+function clampBackoff(ms: number): number {
+  return Math.min(ms, MAX_BACKOFF_MS);
 }
 
 function isAbortError(err: unknown): boolean {
@@ -239,8 +289,18 @@ function isAbortError(err: unknown): boolean {
   return err.name === "AbortError" || err.name === "TimeoutError";
 }
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => {
-    setTimeout(resolve, ms);
+/** Sleep `ms`, resolving early if `signal` aborts (e.g. on shutdown). */
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
   });
 }

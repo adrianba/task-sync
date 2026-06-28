@@ -29,6 +29,11 @@ export function parseTree(content: string): Root {
 /**
  * Parse the syncable Obsidian Tasks-plugin tasks from a file's content.
  *
+ * Convenience wrapper around {@link parseDocument} that returns only the tasks.
+ * The engine uses {@link parseDocument} directly (it also needs
+ * `hasCheckboxItems`); this thin helper is retained as documented public API and
+ * is exercised by the unit tests.
+ *
  * Tasks are scoped using the **block-tag** model: only checklist items that sit
  * under a *defined* tag block (see {@link resolveBlockTags}) are returned, each
  * carrying its `blockTag`. Items not under a defined-tag block are not tasks and

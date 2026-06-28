@@ -98,6 +98,32 @@ describe("config/loadConfig", () => {
     }
   });
 
+  it("defaults inboundIntervalMs to 60000 and parses TASK_SYNC_INBOUND_INTERVAL_MS", () => {
+    const def = loadConfig({ skipEnv: true, overrides: base });
+    expect(def.inboundIntervalMs).toBe(60_000);
+
+    const prev = process.env.TASK_SYNC_INBOUND_INTERVAL_MS;
+    process.env.TASK_SYNC_INBOUND_INTERVAL_MS = "120000";
+    try {
+      const cfg = loadConfig({ overrides: base });
+      expect(cfg.inboundIntervalMs).toBe(120_000);
+    } finally {
+      if (prev === undefined) delete process.env.TASK_SYNC_INBOUND_INTERVAL_MS;
+      else process.env.TASK_SYNC_INBOUND_INTERVAL_MS = prev;
+    }
+  });
+
+  it("rejects a non-positive TASK_SYNC_INBOUND_INTERVAL_MS", () => {
+    const prev = process.env.TASK_SYNC_INBOUND_INTERVAL_MS;
+    process.env.TASK_SYNC_INBOUND_INTERVAL_MS = "0";
+    try {
+      expect(() => loadConfig({ overrides: base })).toThrow(/positive integer/);
+    } finally {
+      if (prev === undefined) delete process.env.TASK_SYNC_INBOUND_INTERVAL_MS;
+      else process.env.TASK_SYNC_INBOUND_INTERVAL_MS = prev;
+    }
+  });
+
   it("parses TASK_SYNC_TODO_TAGS (comma-separated, strips '#', lowercases)", () => {
     const prev = process.env.TASK_SYNC_TODO_TAGS;
     process.env.TASK_SYNC_TODO_TAGS = "#Todo, Work ,, Home";

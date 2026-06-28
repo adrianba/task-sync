@@ -4,6 +4,7 @@
   "tags": ["todo"],
   "ignore": [".obsidian", ".trash", ".git", "node_modules"],
   "watchDebounceMs": 300,
+  "inboundIntervalMs": 60000,
   "inboundInboxFile": "Sync Inbox.md",
   "dryRun": false,
   "health": {

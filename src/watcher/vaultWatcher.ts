@@ -47,7 +47,18 @@ export class VaultWatcher {
     this.log = options.logger ?? defaultLogger;
   }
 
-  /** Register a path so its next change event is ignored (loop protection). */
+  /**
+   * Register a path so its next change event is ignored (loop protection).
+   *
+   * Suppression is a best-effort time window, not an exact match on our own
+   * write event. Two edge cases follow from that, both bounded and self-healing:
+   *  - If the FS event for our write arrives *after* the window (slow disk,
+   *    large file), it is not suppressed and triggers one extra reconcile — which
+   *    is idempotent (content hash unchanged), so it is harmless.
+   *  - If a genuine *user* edit lands within the window right after our write, it
+   *    is suppressed and not picked up until the next full reconcile pass.
+   * The window is kept short to minimize the second case.
+   */
   suppressNext(absPath: string, windowMs = 2000): void {
     const existing = this.suppressed.get(absPath);
     if (existing) clearTimeout(existing);

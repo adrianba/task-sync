@@ -97,8 +97,10 @@ export class SupernoteServiceError extends Error {
 
   constructor(summary: string, status: number, ctx: SupernoteErrorContext) {
     const codePart = ctx.code ? ` code=${ctx.code}` : "";
-    const bodyPart = ctx.body ? ` body=${ctx.body}` : "";
-    super(`${summary} (${ctx.method} ${ctx.url} → HTTP ${status}${codePart})${bodyPart}`);
+    // The response body is retained on `.body` for programmatic use but is
+    // deliberately kept out of the message: error payloads can carry sensitive
+    // data that would otherwise leak into logs via the message/stack.
+    super(`${summary} (${ctx.method} ${ctx.url} → HTTP ${status}${codePart})`);
     this.name = "SupernoteServiceError";
     this.status = status;
     this.code = ctx.code;
@@ -177,7 +179,15 @@ export interface SupernoteHttpClientOptions {
   requestTimeoutMs?: number;
   maxRetries?: number;
   fetch?: typeof fetch;
+  /** Aborts in-flight requests and retry back-off sleeps (e.g. on shutdown). */
+  signal?: AbortSignal;
 }
+
+/** Upper bound for any single retry back-off, including server `Retry-After`. */
+const MAX_BACKOFF_MS = 60_000;
+
+/** Hard cap on pages followed in one pagination loop (cursor-cycle guard). */
+const MAX_PAGES = 10_000;
 
 /** `fetch`-based implementation of {@link SupernoteServiceClient}. */
 export class SupernoteHttpClient implements SupernoteServiceClient {
@@ -185,6 +195,7 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
   private readonly requestTimeoutMs: number;
   private readonly maxRetries: number;
   private readonly fetchFn: typeof fetch;
+  private readonly signal: AbortSignal | undefined;
 
   constructor(
     baseUrl: string,
@@ -196,6 +207,7 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
     this.maxRetries = options.maxRetries ?? 5;
     this.fetchFn = options.fetch ?? fetch;
+    this.signal = options.signal;
   }
 
   async listLists(): Promise<ServiceTaskList[]> {
@@ -205,17 +217,24 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
     // inclusive-boundary re-delivery.
     const byId = new Map<string, ServiceTaskList>();
     let since = 0;
-    for (;;) {
+    for (let page = 0; ; page++) {
+      if (page >= MAX_PAGES) {
+        throw new Error(`Supernote list pagination exceeded ${MAX_PAGES} pages (cursor not advancing)`);
+      }
       const params = new URLSearchParams({ since: String(since) });
-      const page = await this.request<{ lists: ServiceTaskList[]; cursor: number; has_more: boolean }>(
+      const pageResult = await this.request<{ lists: ServiceTaskList[]; cursor: number; has_more: boolean }>(
         "GET",
         `/v1/lists?${params.toString()}`,
       );
-      for (const list of page.lists) {
+      for (const list of pageResult.lists) {
         if (list.id !== null) byId.set(list.id, list);
       }
-      if (!page.has_more) break;
-      since = page.cursor;
+      if (!pageResult.has_more) break;
+      // The cursor must strictly advance; otherwise we would loop forever.
+      if (pageResult.cursor <= since) {
+        throw new Error("Supernote list pagination cursor did not advance");
+      }
+      since = pageResult.cursor;
     }
     return [...byId.values()].filter((list) => !list.is_deleted);
   }
@@ -309,7 +328,7 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
       }
       const requestInit: RequestInit = {
         method,
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
+        signal: this.combinedSignal(),
         headers,
       };
       if (body !== undefined) requestInit.body = JSON.stringify(body);
@@ -324,7 +343,7 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
             waitMs,
             attempt: attempt + 1,
           });
-          await sleep(waitMs);
+          await sleep(waitMs, this.signal);
           continue;
         }
 
@@ -336,6 +355,8 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
       } catch (err) {
         if (err instanceof SupernoteServiceError) throw err;
         if (!isAbortError(err)) throw err;
+        // A caller-supplied shutdown signal must stop retrying immediately.
+        if (this.signal?.aborted) throw err;
         const timeoutError = new SupernoteRequestTimeoutError(this.requestTimeoutMs, {
           cause: err,
         });
@@ -346,9 +367,15 @@ export class SupernoteHttpClient implements SupernoteServiceClient {
           attempt: attempt + 1,
           timeoutMs: this.requestTimeoutMs,
         });
-        await sleep(waitMs);
+        await sleep(waitMs, this.signal);
       }
     }
+  }
+
+  /** Per-request timeout, combined with any caller shutdown signal. */
+  private combinedSignal(): AbortSignal {
+    const timeout = AbortSignal.timeout(this.requestTimeoutMs);
+    return this.signal ? AbortSignal.any([timeout, this.signal]) : timeout;
   }
 }
 
@@ -391,11 +418,16 @@ function retryDelayMs(response: Response | undefined, attempt: number): number {
   const retryAfter = response?.headers.get("Retry-After");
   if (retryAfter) {
     const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds)) return Math.max(seconds, 0) * 1_000;
+    if (Number.isFinite(seconds)) return clampBackoff(Math.max(seconds, 0) * 1_000);
     const retryAt = Date.parse(retryAfter);
-    if (Number.isFinite(retryAt)) return Math.max(retryAt - Date.now(), 0);
+    if (Number.isFinite(retryAt)) return clampBackoff(Math.max(retryAt - Date.now(), 0));
   }
   return Math.min(2 ** attempt * 500, 30_000);
+}
+
+/** Clamp a back-off (including server-provided `Retry-After`) to a sane bound. */
+function clampBackoff(ms: number): number {
+  return Math.min(ms, MAX_BACKOFF_MS);
 }
 
 function isAbortError(err: unknown): boolean {
@@ -403,8 +435,18 @@ function isAbortError(err: unknown): boolean {
   return err.name === "AbortError" || err.name === "TimeoutError";
 }
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => {
-    setTimeout(resolve, ms);
+/** Sleep `ms`, resolving early if `signal` aborts (e.g. on shutdown). */
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
   });
 }

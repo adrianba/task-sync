@@ -12,7 +12,6 @@ import {
   createCipheriv,
   createDecipheriv,
   randomBytes,
-  timingSafeEqual,
 } from "node:crypto";
 
 const ALGORITHM = "aes-256-gcm";
@@ -45,7 +44,11 @@ export function parseKey(raw: string): Buffer {
   return key;
 }
 
-/** Generate a fresh random 32-byte key, base64-encoded (for setup docs/tests). */
+/**
+ * Generate a fresh random 32-byte key, base64-encoded. Intended for operator
+ * setup (e.g. seeding `TASK_SYNC_TOKEN_KEY`) and used by the unit tests; not
+ * referenced by the running service.
+ */
 export function generateKeyBase64(): string {
   return randomBytes(KEY_BYTES).toString("base64");
 }
@@ -87,14 +90,6 @@ export function decryptString(envelope: string, key: Buffer): string {
     decipher.final(),
   ]);
   return plaintext.toString("utf8");
-}
-
-/** Constant-time comparison helper (e.g. for health/admin tokens). */
-export function safeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ba.length !== bb.length) return false;
-  return timingSafeEqual(ba, bb);
 }
 
 function assertKey(key: Buffer): void {

@@ -120,7 +120,7 @@ export class Service {
 
     // Periodic full reconcile catches inbound changes (status edits to existing
     // tasks and brand-new external tasks) that no vault file-change event fires.
-    const intervalMs = this.options.inboundIntervalMs ?? 60_000;
+    const intervalMs = this.options.inboundIntervalMs ?? this.config.inboundIntervalMs;
     this.inboundTimer = setInterval(() => {
       void this.runSafely(async () => {
         const r = await this.engine!.reconcile();

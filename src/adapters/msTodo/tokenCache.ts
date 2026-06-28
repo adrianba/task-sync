@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { access, chmod, readFile } from "node:fs/promises";
 import type { ICachePlugin, TokenCacheContext } from "@azure/msal-node";
 import type { Logger } from "../../logger.js";
 import { logger as defaultLogger } from "../../logger.js";
@@ -20,12 +20,21 @@ export class EncryptedTokenCachePlugin implements ICachePlugin {
       return;
     }
 
+    // Tighten permissions on an existing cache in case it was pre-created with
+    // looser modes; writes always use 0o600 but a pre-existing file may not.
+    try {
+      await chmod(this.filePath, 0o600);
+    } catch {
+      // Best-effort (e.g. unsupported on the host filesystem); ignore.
+    }
+
     try {
       const encrypted = await readFile(this.filePath, "utf8");
       const serialized = decryptString(encrypted, this.key);
       cacheContext.tokenCache.deserialize(serialized);
-    } catch (err) {
-      this.log.error("Failed to decrypt MSAL token cache; starting fresh", { err });
+    } catch {
+      // Do not log the raw error: it can carry file paths or crypto internals.
+      this.log.error("Failed to decrypt MSAL token cache; starting fresh");
     }
   }
 
