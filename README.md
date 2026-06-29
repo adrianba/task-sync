@@ -233,6 +233,7 @@ shape.
 | `statePath` | `TASK_SYNC_STATE_PATH` | `/data/state.json` | Sync state file. |
 | `tags` | `TASK_SYNC_TODO_TAGS` | `todo` | Defined tags that mark a checklist block as synced tasks (comma-separated env; leading `#` optional). |
 | `inboundInboxFile` | `TASK_SYNC_INBOX_FILE` | `Sync Inbox.md` | Note that receives externally-created tasks. |
+| `ignorePaths` | `TASK_SYNC_IGNORE_PATHS` | `[]` | Extra vault-relative folders to exclude from scanning/watching (comma-separated env; e.g. `Tasks/Templates`). Matched on a segment boundary, case-insensitive. The standard set (`.obsidian`, `.trash`, `.git`, `node_modules`) is always skipped on top of these. |
 | `watchDebounceMs` | — | `300` | Debounce window for file changes. |
 | `inboundIntervalMs` | `TASK_SYNC_INBOUND_INTERVAL_MS` | `60000` | How often (ms) to poll backends for inbound changes. The vault is watched in real time; this only governs the pull direction. |
 | `dryRun` | `TASK_SYNC_DRY_RUN` | `false` | Observe-only. |

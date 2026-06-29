@@ -72,6 +72,7 @@ export class Service {
         {
           vaultPath: this.config.vaultPath,
           ignore: this.config.ignore,
+          ignorePaths: this.config.ignorePaths,
           debounceMs: this.config.watchDebounceMs,
           logger: this.log,
         },
@@ -82,6 +83,7 @@ export class Service {
     this.engine = new SyncEngine(this.registry.entries(), this.store, {
       vaultPath: this.config.vaultPath,
       ignore: this.config.ignore,
+      ignorePaths: this.config.ignorePaths,
       definedTags: this.config.tags,
       dryRun,
       inboundInboxFile: this.config.inboundInboxFile,

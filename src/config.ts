@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 import type { LogLevel } from "./logger.js";
+import { normalizeIgnorePath } from "./util/ignore.js";
 
 export type ListMappingStrategy = "tag" | "file" | "hybrid";
 export type ConflictPolicy = "vault-wins" | "external-wins" | "newer";
@@ -63,6 +64,16 @@ const configSchema = z.object({
   ignore: z
     .array(z.string())
     .default([".obsidian", ".trash", ".git", "node_modules"]),
+  /**
+   * Additional vault-relative path prefixes to exclude from scanning/watching
+   * (e.g. `Tasks/Templates`). Matched on a segment boundary, case-insensitive.
+   * The standard {@link ignore} directory names are always skipped on top of
+   * these.
+   */
+  ignorePaths: z
+    .array(z.string())
+    .default([])
+    .transform((arr) => arr.map(normalizeIgnorePath).filter((p) => p !== "")),
   /**
    * Defined checklist tags (obsidian-checklist-plugin model). A tag on the
    * non-task line above a checklist governs that block; only these tags (and
@@ -167,6 +178,10 @@ function fromEnv(): Record<string, unknown> {
       .map((s) => s.trim().replace(/^#/, ""))
       .filter(Boolean);
   if (env.TASK_SYNC_INBOX_FILE) out.inboundInboxFile = env.TASK_SYNC_INBOX_FILE;
+  if (env.TASK_SYNC_IGNORE_PATHS)
+    out.ignorePaths = env.TASK_SYNC_IGNORE_PATHS.split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
   if (env.TASK_SYNC_INBOUND_INTERVAL_MS) {
     const n = Number(env.TASK_SYNC_INBOUND_INTERVAL_MS);
     if (!Number.isInteger(n) || n <= 0) {

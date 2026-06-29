@@ -10,6 +10,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { relative, sep } from "node:path";
 import type { Logger } from "../logger.js";
 import { logger as defaultLogger } from "../logger.js";
+import { isPathIgnored } from "../util/ignore.js";
 
 export type ChangeKind = "add" | "change" | "unlink";
 
@@ -27,6 +28,8 @@ export interface VaultWatcherOptions {
   vaultPath: string;
   /** Directory names to ignore anywhere in the tree. */
   ignore: string[];
+  /** Vault-relative path prefixes to ignore (e.g. `Tasks/Templates`). */
+  ignorePaths?: string[];
   /** Debounce window for coalescing events (ms). */
   debounceMs: number;
   logger?: Logger;
@@ -69,9 +72,7 @@ export class VaultWatcher {
 
   private isIgnoredPath(absPath: string): boolean {
     const rel = relative(this.options.vaultPath, absPath);
-    if (rel.startsWith("..")) return true;
-    const segments = rel.split(sep);
-    return segments.some((s) => this.options.ignore.includes(s));
+    return isPathIgnored(rel, this.options.ignore, this.options.ignorePaths ?? []);
   }
 
   private enqueue(kind: ChangeKind, absPath: string): void {

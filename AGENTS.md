@@ -105,6 +105,13 @@ engine to a specific provider.
   Inbound tasks are imported only if
   their list maps to a defined tag, into an existing block or a new tagged block
   in the Sync Inbox.
+- **Scan/watch exclusion** is two-tier (`util/ignore.ts`, pure): the standard
+  segment-name set (`.obsidian`, `.trash`, `.git`, `node_modules`) is **always**
+  skipped, plus user-configurable vault-relative path prefixes
+  (`ignorePaths` / `TASK_SYNC_IGNORE_PATHS`, e.g. `Tasks/Templates`) matched on a
+  segment boundary, case-insensitive. Both `SyncEngine.isIgnored` and
+  `VaultWatcher` delegate to `isPathIgnored`, so extras are excluded from
+  scanning and watch events alike.
 - **3-way reconciliation** with content hashing on sync-relevant fields only.
   Conflict policy is configurable per backend; default `newer`, **Supernote
   defaults to `vault-wins`** (its device sync is undocumented/last-write-wins).

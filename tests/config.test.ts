@@ -86,6 +86,29 @@ describe("config/loadConfig", () => {
     ).toThrow(/tags must contain at least one non-empty tag/u);
   });
 
+  it("defaults ignorePaths to empty and normalizes overrides", () => {
+    const cfg = loadConfig({ skipEnv: true, overrides: base });
+    expect(cfg.ignorePaths).toEqual([]);
+    const cfg2 = loadConfig({
+      skipEnv: true,
+      overrides: { ...base, ignorePaths: ["/Tasks/Templates/", "Inbox\\Drafts", ""] },
+    });
+    expect(cfg2.ignorePaths).toEqual(["tasks/templates", "inbox/drafts"]);
+  });
+
+  it("parses TASK_SYNC_IGNORE_PATHS into normalized ignorePaths", () => {
+    const prev = process.env.TASK_SYNC_IGNORE_PATHS;
+    process.env.TASK_SYNC_IGNORE_PATHS = "Tasks/Templates, /Archive/ ,";
+    try {
+      const cfg = loadConfig({ overrides: base });
+      expect(cfg.ignorePaths).toEqual(["tasks/templates", "archive"]);
+    } finally {
+      if (prev === undefined) delete process.env.TASK_SYNC_IGNORE_PATHS;
+      else process.env.TASK_SYNC_IGNORE_PATHS = prev;
+    }
+  });
+
+
   it("parses TASK_SYNC_DRY_RUN=true into config.dryRun", () => {
     const prev = process.env.TASK_SYNC_DRY_RUN;
     process.env.TASK_SYNC_DRY_RUN = "true";

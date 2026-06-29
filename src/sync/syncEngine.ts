@@ -27,6 +27,7 @@ import type { Logger } from "../logger.js";
 import { parseDocument, parseTree } from "../vault/document.js";
 import { normalizeTag, resolveBlockTags } from "../vault/blocks.js";
 import { statusToChar } from "../vault/taskMeta.js";
+import { isPathIgnored } from "../util/ignore.js";
 import {
   resolveListKey,
   generateSyncId,
@@ -50,6 +51,8 @@ import { DeltaTokenExpiredError } from "../adapters/msTodo/msTodoAdapter.js";
 export interface SyncEngineOptions {
   vaultPath: string;
   ignore: string[];
+  /** Vault-relative path prefixes to exclude (e.g. `Tasks/Templates`). */
+  ignorePaths?: string[];
   /** Defined checklist tags whose blocks are synced (without leading '#'). */
   definedTags: string[];
   /** When true, never write to markdown or any external system. */
@@ -239,7 +242,7 @@ export class SyncEngine {
   // --- vault scanning -----------------------------------------------------
 
   private isIgnored(rel: string): boolean {
-    return rel.split(sep).some((s) => this.options.ignore.includes(s));
+    return isPathIgnored(rel, this.options.ignore, this.options.ignorePaths ?? []);
   }
 
   private async listMarkdownFiles(dir: string): Promise<string[]> {
