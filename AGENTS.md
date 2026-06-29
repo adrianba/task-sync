@@ -111,7 +111,14 @@ engine to a specific provider.
   (`ignorePaths` / `TASK_SYNC_IGNORE_PATHS`, e.g. `Tasks/Templates`) matched on a
   segment boundary, case-insensitive. Both `SyncEngine.isIgnored` and
   `VaultWatcher` delegate to `isPathIgnored`, so extras are excluded from
-  scanning and watch events alike.
+  scanning and watch events alike. Excluding a folder takes a synced task out of
+  scope, so the next **full** reconcile deletes its backend task (vault-wins) and
+  prunes its link — exclusion == deletion, not orphaning.
+- **Bounded `state.json`:** links for removed/excluded tasks are pruned in the
+  deletion sweep; the full `reconcile()` also prunes `fileHashes` for files no
+  longer scanned (deleted/excluded) and `deltaTokens` for lists no longer
+  returned by `listLists()` (token prune limited to backends that enumerated, so
+  a failed `listLists()` never wipes tokens). Pruning is skipped on read errors.
 - **3-way reconciliation** with content hashing on sync-relevant fields only.
   Conflict policy is configurable per backend; default `newer`, **Supernote
   defaults to `vault-wins`** (its device sync is undocumented/last-write-wins).

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExternalLink, Task } from "../src/model/task.js";
-import { hashTask, StateStore } from "../src/state/stateStore.js";
+import { hashTask, StateStore, deltaTokenKey } from "../src/state/stateStore.js";
 
 const testRoot = join(process.cwd(), ".test-tmp");
 let testDir: string;
@@ -57,6 +57,37 @@ describe("StateStore", () => {
     expect(store.allLinks()).toHaveLength(0);
     expect(store.getDeltaToken("ms-todo", "list-1")).toBeUndefined();
     expect(store.getFileHash("Projects/Alpha.md")).toBeUndefined();
+  });
+
+  it("prunes file hashes not in the keep set and reports the count", async () => {
+    const store = new StateStore(statePath());
+    await store.load();
+    store.setFileHash("Keep.md", "h1");
+    store.setFileHash("Templates/Drop.md", "h2");
+    store.setFileHash("Gone.md", "h3");
+
+    const pruned = store.pruneFileHashes(new Set(["Keep.md"]));
+
+    expect(pruned).toBe(2);
+    expect(store.getFileHash("Keep.md")).toBe("h1");
+    expect(store.getFileHash("Templates/Drop.md")).toBeUndefined();
+    expect(store.getFileHash("Gone.md")).toBeUndefined();
+  });
+
+  it("prunes orphan delta tokens only for backends that enumerated lists", async () => {
+    const store = new StateStore(statePath());
+    await store.load();
+    store.setDeltaToken("ms-todo", "list-1", "t1");
+    store.setDeltaToken("ms-todo", "gone", "t2");
+    store.setDeltaToken("supernote", "list-2", "t3");
+
+    const keep = new Set([deltaTokenKey("ms-todo", "list-1")]);
+    const pruned = store.pruneDeltaTokens(keep, new Set(["ms-todo"]));
+
+    expect(pruned).toBe(1);
+    expect(store.getDeltaToken("ms-todo", "list-1")).toBe("t1");
+    expect(store.getDeltaToken("ms-todo", "gone")).toBeUndefined();
+    expect(store.getDeltaToken("supernote", "list-2")).toBe("t3");
   });
 
   it("upserts links by sync id and backend while preserving fan-out", async () => {

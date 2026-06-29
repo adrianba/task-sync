@@ -33,7 +33,7 @@ import {
   generateSyncId,
   listNameToTag,
 } from "../mapping/listMapping.js";
-import { StateStore, hashTask } from "../state/stateStore.js";
+import { StateStore, hashTask, deltaTokenKey } from "../state/stateStore.js";
 import {
   applyMutations,
   appendLines,
@@ -295,6 +295,7 @@ export class SyncEngine {
   /** Run a full reconciliation pass over the whole vault. */
   async reconcile(): Promise<ReconcileResult> {
     const files = await this.listMarkdownFiles(this.options.vaultPath);
+    const visitedTokenKeys = new Set<string>();
     const moveCtx: MoveContext = {
       allowInboundRelocation: true,
       pending: [],
@@ -327,7 +328,7 @@ export class SyncEngine {
         );
       }
     }
-    result.inboundCreated += await this.pullInbound();
+    result.inboundCreated += await this.pullInbound(visitedTokenKeys);
     // Resolve deferred outbound recreations now that inbound correlation has had
     // a chance to re-key moved tasks by sync-id (avoids duplicating an app-moved
     // task whose id changed).
@@ -335,6 +336,19 @@ export class SyncEngine {
     // Ordering is a list-global property, so it runs in the full pass (after
     // field reconcile + inbound creation) when the whole vault is available.
     if (!this.options.dryRun) await this.reconcileOrdering(files, result);
+    // Bound state.json: drop hashes for files no longer scanned (deleted or
+    // excluded) and delta tokens for lists no longer present. Skipped on a read
+    // error so a partial scan can't wipe live entries.
+    if (!this.options.dryRun && !filesResult.hadReadError) {
+      const keepFiles = new Set(
+        files.map((p) => relative(this.options.vaultPath, p).split(sep).join("/")),
+      );
+      const prunedHashes = this.store.pruneFileHashes(keepFiles);
+      const seenBackends = new Set([...visitedTokenKeys].map((k) => k.split("::")[0] ?? ""));
+      const prunedTokens = this.store.pruneDeltaTokens(visitedTokenKeys, seenBackends);
+      if (prunedHashes > 0 || prunedTokens > 0)
+        this.log.info("Pruned stale state", { fileHashes: prunedHashes, deltaTokens: prunedTokens });
+    }
     if (!this.options.dryRun) await this.store.flush();
     return result;
   }
@@ -1036,7 +1050,7 @@ export class SyncEngine {
    * to the shared Sync Inbox note. Uses delta when available, else full listing.
    * Returns the number of new tasks created locally.
    */
-  async pullInbound(): Promise<number> {
+  async pullInbound(visitedTokenKeys?: Set<string>): Promise<number> {
     if (this.options.dryRun) return 0;
     const inboxAbs = join(this.options.vaultPath, this.options.inboundInboxFile);
     let created = 0;
@@ -1058,6 +1072,7 @@ export class SyncEngine {
       try {
         const lists = await entry.adapter.listLists();
         for (const list of lists) {
+          if (visitedTokenKeys) visitedTokenKeys.add(deltaTokenKey(backend, list.id));
           const fetched = await this.fetchExternalTasks(entry, list.id, list.name);
           await this.removeLinksForDeletedExternalTasks(backend, fetched.removedIds);
           for (const ext of fetched.changed) {

@@ -115,6 +115,25 @@ describe("SyncEngine deletion reconciliation", () => {
     expect(store.allLinks()).toHaveLength(0);
   });
 
+  it("excluding a folder deletes its tasks and prunes their file hashes", async () => {
+    await mkdir(join(vault, "Templates"), { recursive: true });
+    await writeFile(join(vault, "Keep.md"), "#todo\n- [ ] keeper\n");
+    await writeFile(join(vault, "Templates", "T.md"), "#todo\n- [ ] templated\n");
+    const adapter = new DeletionAwareAdapter("alpha");
+    const { engine, store } = await newEngine([entry(adapter)]);
+    await engine.reconcile();
+    expect(store.allLinks()).toHaveLength(2);
+    expect(store.getFileHash("Templates/T.md")).toBeDefined();
+
+    const excluded = await newEngine([entry(adapter)], { ignorePaths: ["templates"] });
+    const result = await excluded.engine.reconcile();
+
+    expect(result.deletedExternal).toBe(1);
+    expect(adapter.allTasks()).toHaveLength(1);
+    expect(excluded.store.getFileHash("Templates/T.md")).toBeUndefined();
+    expect(excluded.store.getFileHash("Keep.md")).toBeDefined();
+  });
+
   it("prunes the link (no repeated retries) when the external task is already gone", async () => {
     const file = join(vault, "Work.md");
     await writeFile(file, "#todo\n- [ ] Remove me\n");

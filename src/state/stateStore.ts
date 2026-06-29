@@ -105,6 +105,41 @@ export class StateStore {
     this.data.fileHashes[filePath] = hash;
   }
 
+  /**
+   * Drop tracked file hashes whose path is not in `keep`. Returns the count
+   * pruned. Called after a full scan so deleted/excluded files don't leak
+   * stale entries into state.json indefinitely.
+   */
+  pruneFileHashes(keep: ReadonlySet<string>): number {
+    let pruned = 0;
+    for (const path of Object.keys(this.data.fileHashes)) {
+      if (!keep.has(path)) {
+        delete this.data.fileHashes[path];
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
+  /**
+   * Drop delta tokens whose `(backend, listId)` pair is not in `keep`, limited
+   * to `prunableBackends` (backends that successfully enumerated their lists).
+   * This prevents a backend whose `listLists()` failed from having its tokens
+   * wiped. Returns the count pruned.
+   */
+  pruneDeltaTokens(keep: ReadonlySet<string>, prunableBackends: ReadonlySet<string>): number {
+    let pruned = 0;
+    for (const key of Object.keys(this.data.deltaTokens)) {
+      const backend = key.split("::")[0] ?? "";
+      if (!prunableBackends.has(backend)) continue;
+      if (!keep.has(key)) {
+        delete this.data.deltaTokens[key];
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
   /** Atomically persist to disk via atomicWriteFile (mode 0o600). */
   async flush(): Promise<void> {
     await atomicWriteFile(this.path, `${JSON.stringify(this.data, null, 2)}\n`, { mode: 0o600 });
@@ -148,6 +183,10 @@ function emptyState(): StateStoreData {
 
 function linkKey(syncId: string, backend: string): string {
   return `${syncId}\u0000${backend}`;
+}
+
+export function deltaTokenKey(backend: string, listId: string): string {
+  return deltaKey(backend, listId);
 }
 
 function deltaKey(backend: string, listId: string): string {
