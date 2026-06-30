@@ -115,6 +115,22 @@ describe("SyncEngine deletion reconciliation", () => {
     expect(store.allLinks()).toHaveLength(0);
   });
 
+  it("counts swallowed backend failures in result.errors without throwing", async () => {
+    const file = join(vault, "Work.md");
+    await writeFile(file, "#todo\n- [ ] Sync me\n");
+    class CreateFailsAdapter extends DeletionAwareAdapter {
+      override createTask(): Promise<never> {
+        return Promise.reject(new Error("backend down"));
+      }
+    }
+    const adapter = new CreateFailsAdapter("alpha");
+    const { engine } = await newEngine([entry(adapter)]);
+
+    const result = await engine.reconcile();
+
+    expect(result.errors).toBeGreaterThanOrEqual(1);
+  });
+
   it("excluding a folder deletes its tasks and prunes their file hashes", async () => {
     await mkdir(join(vault, "Templates"), { recursive: true });
     await writeFile(join(vault, "Keep.md"), "#todo\n- [ ] keeper\n");

@@ -44,6 +44,26 @@ describe("BackendRegistry", () => {
     expect(healthy.initCalls).toBe(1);
   });
 
+  it("reports the names of backends whose init failed", async () => {
+    const healthy = new FakeAdapter("healthy");
+    const failing = new FailingInitAdapter("failing");
+    const registry = new BackendRegistry([entry(failing), entry(healthy)]);
+
+    await registry.initAll(logger);
+
+    expect(registry.failedBackendNames()).toEqual(["failing"]);
+  });
+
+  it("reports no failed backends when all init succeed", async () => {
+    const a = new FakeAdapter("a");
+    const b = new FakeAdapter("b");
+    const registry = new BackendRegistry([entry(a), entry(b)]);
+
+    await registry.initAll(logger);
+
+    expect(registry.failedBackendNames()).toEqual([]);
+  });
+
   it("closes only successfully initialized adapters", async () => {
     const healthy = new FakeAdapter("healthy");
     const failing = new FailingInitAdapter("failing");

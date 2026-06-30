@@ -19,6 +19,7 @@ export interface BackendEntry {
 
 export class BackendRegistry {
   private initializedBackends: BackendEntry[] | undefined;
+  private failedBackends: string[] = [];
 
   constructor(private readonly backends: BackendEntry[]) {
     if (backends.length === 0) {
@@ -72,11 +73,13 @@ export class BackendRegistry {
   /** Initialize every adapter (auth, DB connect), excluding degraded backends. */
   async initAll(logger?: Logger): Promise<void> {
     const initialized: BackendEntry[] = [];
+    const failed: string[] = [];
     for (const e of this.backends) {
       try {
         await e.adapter.init?.();
         initialized.push(e);
       } catch (err) {
+        failed.push(e.adapter.backend);
         logger?.error("Backend initialization failed; excluding backend from this run", {
           backend: e.adapter.backend,
           err,
@@ -84,9 +87,19 @@ export class BackendRegistry {
       }
     }
     this.initializedBackends = initialized;
+    this.failedBackends = failed;
     if (initialized.length === 0) {
       throw new Error("No backends initialized successfully.");
     }
+  }
+
+  /**
+   * Names of backends whose `init()` threw during the last {@link initAll}.
+   * Used by once mode to fail the run (non-zero exit) on a partial init failure
+   * even though the surviving backends still synced.
+   */
+  failedBackendNames(): readonly string[] {
+    return this.failedBackends;
   }
 
   /** Gracefully close every adapter. Errors are swallowed per-adapter. */

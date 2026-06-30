@@ -561,6 +561,42 @@ task-sync [options]
   -h, --help      Show help
 ```
 
+### Run-once mode (scripted / cron / Docker)
+
+`--once` runs a single full reconcile, then exits — ideal for cron or one-shot
+container runs. Its **exit code** is meaningful:
+
+- `0` — the reconcile pass completed cleanly.
+- non-zero — the pass failed, a backend reported errors during the pass, or a
+  backend failed to initialize (e.g. first-run Microsoft auth was not completed).
+
+Because the entrypoint passes arguments through, with the published image you can
+just append the flag:
+
+```bash
+docker run --rm \
+  -v task-sync-data:/data -v /path/to/vault:/vault \
+  --env-file .env \
+  ghcr.io/adrianba/task-sync:latest --once
+```
+
+**First-run Microsoft authentication when using `--once`.** The device-code flow
+is interactive: on the very first run (no cached token) task-sync logs a URL and
+a one-time code and **waits** for you to sign in. Seed the token cache once with
+an interactive run so later scripted runs are non-interactive:
+
+```bash
+# One-time interactive seeding — watch the logs for the URL + code, then sign in.
+docker run --rm -it \
+  -v task-sync-data:/data -v /path/to/vault:/vault \
+  --env-file .env \
+  ghcr.io/adrianba/task-sync:latest --once
+```
+
+The resulting AES-256-GCM-encrypted cache lives on the `/data` volume
+(`MS_TOKEN_CACHE_PATH`), so every subsequent `--once` (or daemon) run reuses it
+silently. Keep the same `/data` volume and `TASK_SYNC_TOKEN_KEY` across runs.
+
 ---
 
 ## Development

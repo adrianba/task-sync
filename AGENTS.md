@@ -127,6 +127,17 @@ engine to a specific provider.
 - **Loop protection:** the writer calls `suppressNext(path)` before writing.
 - **Encrypted token cache:** MSAL cache is AES-256-GCM encrypted at rest on a
   mounted volume; key from `TASK_SYNC_TOKEN_KEY` (`util/crypto.ts`).
+- **Run-once mode (`--once`)** runs one full `reconcile()` then `stop()`s, with no
+  watcher/timers/health server (`Service.options.once`). Its **exit code is
+  meaningful** for scripted/cron use: `index.ts` calls `process.exit(service
+  .runFailed ? 1 : 0)`. `Service.runFailed` is true if the single pass threw or
+  recorded swallowed backend errors (`ReconcileResult.errors`, incremented at the
+  per-task / inbound-pull / ordering / relocation catch sites) **or** any backend
+  failed to initialize (`BackendRegistry.failedBackendNames()` — e.g. first-run MS
+  auth not completed). First-run device-code auth still works in once mode (it
+  fires eagerly in `initAll` → `MsTodoAdapter.init` → `listLists`, blocking until
+  sign-in); seed the `/data` token cache once interactively, then scripted runs
+  are silent. Continuous mode never reads `runFailed`.
 
 ## Backend gotchas
 

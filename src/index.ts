@@ -109,6 +109,13 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
 
   await service.start();
+
+  // In once mode start() resolves after the single pass. Exit non-zero if that
+  // pass failed or any backend errored (e.g. first-run auth not completed) so
+  // scripted/cron callers can detect failure. Continuous mode keeps running.
+  if (args.once) {
+    process.exit(service.runFailed ? 1 : 0);
+  }
 }
 
 main().catch((err: unknown) => {

@@ -80,6 +80,12 @@ export interface ReconcileResult {
   movedOutbound: number;
   /** Tasks whose markdown line was relocated to reflect a backend list move. */
   movedInbound: number;
+  /**
+   * Count of backend operations that failed and were swallowed to isolate other
+   * work (per-task reconcile, inbound pull, ordering, relocation). Non-zero means
+   * the pass completed but some backend work did not — used to fail once-mode.
+   */
+  errors: number;
 }
 
 function emptyResult(): ReconcileResult {
@@ -95,6 +101,7 @@ function emptyResult(): ReconcileResult {
     reorderedInbound: 0,
     movedOutbound: 0,
     movedInbound: 0,
+    errors: 0,
   };
 }
 
@@ -328,7 +335,7 @@ export class SyncEngine {
         );
       }
     }
-    result.inboundCreated += await this.pullInbound(visitedTokenKeys);
+    result.inboundCreated += await this.pullInbound(visitedTokenKeys, result);
     // Resolve deferred outbound recreations now that inbound correlation has had
     // a chance to re-key moved tasks by sync-id (avoids duplicating an app-moved
     // task whose id changed).
@@ -528,6 +535,7 @@ export class SyncEngine {
       try {
         current = await this.reconcileTaskToBackend(absPath, current, entry, result, moveCtx);
       } catch (err) {
+        result.errors++;
         // Isolate backend failures so one backend cannot break the others.
         this.log.error("Backend reconcile failed for task", {
           backend: entry.adapter.backend,
@@ -1007,6 +1015,7 @@ export class SyncEngine {
           toTag: reloc.toTag,
         });
       } catch (err) {
+        result.errors++;
         this.log.error("Inbound relocation failed", {
           backend: reloc.backend,
           syncId: reloc.syncId,
@@ -1050,7 +1059,7 @@ export class SyncEngine {
    * to the shared Sync Inbox note. Uses delta when available, else full listing.
    * Returns the number of new tasks created locally.
    */
-  async pullInbound(visitedTokenKeys?: Set<string>): Promise<number> {
+  async pullInbound(visitedTokenKeys?: Set<string>, result?: ReconcileResult): Promise<number> {
     if (this.options.dryRun) return 0;
     const inboxAbs = join(this.options.vaultPath, this.options.inboundInboxFile);
     let created = 0;
@@ -1095,6 +1104,7 @@ export class SyncEngine {
           }
         }
       } catch (err) {
+        if (result) result.errors++;
         this.log.error("Inbound pull failed", { backend, err });
       }
     }
@@ -1433,6 +1443,7 @@ export class SyncEngine {
       try {
         await this.reconcileOrderingForBackend(entry, parsed, result);
       } catch (err) {
+        result.errors++;
         this.log.error("Ordering reconcile failed", { backend: entry.adapter.backend, err });
       }
     }

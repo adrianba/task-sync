@@ -41,6 +41,12 @@ export class Service {
   private stopPromise: Promise<void> | undefined;
   private lastError: string | undefined;
 
+  /**
+   * Whether the most recent reconcile pass failed. Combined with backend init
+   * failures by {@link runFailed} to drive the once-mode exit code.
+   */
+  private passFailed = false;
+
   constructor(
     private readonly config: Config,
     private readonly options: ServiceOptions = {},
@@ -112,6 +118,7 @@ export class Service {
     // Initial full reconcile.
     await this.runSafely(async () => {
       const r = await this.engine!.reconcile();
+      if (r.errors > 0) this.passFailed = true;
       this.log.info("Initial reconcile complete", { ...r });
     });
 
@@ -147,6 +154,16 @@ export class Service {
     this.log.info("task-sync ready");
   }
 
+  /**
+   * Whether the run should be considered failed — for the once-mode exit code.
+   * True if the single reconcile pass threw or recorded swallowed backend errors,
+   * or if any backend failed to initialize (e.g. first-run auth not completed).
+   * Only meaningful after a `once` {@link start}; continuous mode never reads it.
+   */
+  get runFailed(): boolean {
+    return this.passFailed || (this.registry?.failedBackendNames().length ?? 0) > 0;
+  }
+
   private async onVaultChanges(changes: VaultChange[]): Promise<void> {
     const paths = changes
       .filter((c) => c.kind !== "unlink")
@@ -170,12 +187,17 @@ export class Service {
       return;
     }
     this.running = true;
+    // Reset the per-pass failure flag up front so it reflects only this pass.
+    // `fn` may set it true (e.g. swallowed backend errors via result.errors);
+    // a thrown error sets it true in catch. Success leaves it as fn left it.
+    this.passFailed = false;
     const pass = (async () => {
       try {
         await fn();
         this.lastError = undefined;
       } catch (err) {
         this.healthy = true; // a single failed pass is not fatal
+        this.passFailed = true;
         this.lastError = err instanceof Error ? err.message : String(err);
         this.log.error("Reconcile pass failed", { err });
       } finally {
